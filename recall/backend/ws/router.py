@@ -1,7 +1,7 @@
 """
 ws/router.py — FastAPI WebSocket endpoint for real-time workspace sync.
 
-Clients connect via:  ws://localhost:8000/ws/{workspace_id}?client_id=...
+Clients connect via:  ws://localhost:8100/ws/{workspace_id}?client_id=...
 
 Protocol (JSON messages both directions):
   Client → Server:

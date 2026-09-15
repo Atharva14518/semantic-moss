@@ -15,18 +15,22 @@ cp .env .env.local   # already has Moss creds
 docker compose up -d --build
 
 # 4. Verify everything is healthy
-curl http://localhost:8000/health | python3 -m json.tool
+curl http://localhost:8100/health | python3 -m json.tool
 
 # 5. Run the Moss round-trip smoke test
-curl http://localhost:8000/moss/test | python3 -m json.tool
+curl http://localhost:8100/moss/test | python3 -m json.tool
+
+# 6. Frontend (port 5175 — 5173 is often another Vite app)
+cd frontend && npm install && npm run dev
 ```
 
 ## Services
 
 | Service | Local URL | Purpose |
 |---|---|---|
-| Backend API | http://localhost:8000 | FastAPI + agents |
-| API Docs | http://localhost:8000/docs | Swagger UI |
+| Frontend | http://localhost:5175 | React workspace |
+| Backend API | http://localhost:8100 | FastAPI + agents |
+| API Docs | http://localhost:8100/docs | Swagger UI |
 | Postgres | localhost:5432 | Source of truth |
 | Redis | localhost:6379 | Locks, queues |
 | Qdrant | http://localhost:6333 | Cold vector store |
@@ -56,13 +60,32 @@ curl http://localhost:8000/moss/test | python3 -m json.tool
 ## Build Phases
 
 - [x] **Phase 0** — Foundations: Docker stack, schema, /health, Moss round-trip
-- [ ] **Phase 1** — Core orchestration: LangGraph state machine, Postgres checkpointing
-- [ ] **Phase 2** — Multiplayer UI: WebSockets, three-pane React workspace
-- [ ] **Phase 3** — Security: domain allowlists, per-workspace Moss isolation
+- [x] **Phase 1** — Core orchestration: LangGraph state machine, Postgres checkpointing
+- [x] **Phase 2** — Multiplayer UI: WebSockets, three-pane React workspace
+- [x] **Phase 3** — Security: domain allowlists, Moss authz, per-workspace isolation
 - [ ] **Phase 4** — Cold storage + benchmark panel
 - [ ] **Phase 5** — Reliability: retries, backoff, test suite
 - [ ] **Phase 6** — Deployment: Fly.io + Vercel
 - [ ] **Phase 7** — Polish: README, demo video, design review
+
+## Phase 3 — Security
+
+Executor Playwright navigation is gated by a per-workspace domain allowlist. Blocked attempts are written to `audit_logs`, broadcast as `flagged_event` on the workspace WebSocket, and shown in the activity thread.
+
+Moss retrieval is isolated per workspace (`moss_project_id` / `moss_project_key` / `moss_index_name` on the workspace row). Hits are authorized on the orchestrator before any agent prompt: document IDs are namespaced `{workspace_id}::{local_id}`; foreign or unscoped documents are stripped.
+
+```bash
+# Replace WORKSPACE_ID with the UUID shown in the left pane (last 8 chars are a suffix).
+# The UI stores the full id in localStorage under recall_ws_id.
+
+curl -s -X POST "http://localhost:8100/workspace/${WORKSPACE_ID}/executor/browse" \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://evil.com/exfiltrate"}' | python3 -m json.tool
+
+curl -s "http://localhost:8100/workspace/${WORKSPACE_ID}/audit" | python3 -m json.tool
+```
+
+A live UI tab on that workspace should show a flagged Executor event immediately.
 
 ## Non-Goals (v1)
 

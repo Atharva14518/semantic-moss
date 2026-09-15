@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import './index.css'
 
-const API = 'http://localhost:8000'
-const WS_BASE = 'ws://localhost:8000'
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8100'
+const WS_BASE = import.meta.env.VITE_WS_URL || 'ws://localhost:8100'
 
 // ── Utilities ─────────────────────────────────────────────────────
 
@@ -43,7 +43,7 @@ function PresenceDot({ type }) {
   return <span className={`presence-dot ${type}`} />
 }
 
-function Sidebar({ participants, wsId }) {
+function Sidebar({ participants, wsId, allowedDomains }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
@@ -54,6 +54,16 @@ function Sidebar({ participants, wsId }) {
         <div className="sidebar-ws-name">Workspace</div>
         <div className="ws-id-pill" title={wsId}>{wsId.slice(-8)}</div>
       </div>
+      {allowedDomains?.length > 0 && (
+        <>
+          <div className="sidebar-section-label">Allowlist</div>
+          <ul className="allowlist">
+            {allowedDomains.map(d => (
+              <li key={d} className="allowlist-item">{d}</li>
+            ))}
+          </ul>
+        </>
+      )}
 
       <div className="sidebar-section-label">Participants</div>
       <ul className="participant-list">
@@ -71,28 +81,34 @@ function Sidebar({ participants, wsId }) {
 
 function MessageRow({ msg }) {
   const isAgent = ['planner', 'executor', 'reviewer'].includes(msg.role)
-  const isEscalated = msg.content?.includes('escalated') || msg.content?.includes('⚠')
+  const isFlagged = msg.flagged || msg.type === 'flagged_event' || msg.event_type === 'domain_blocked'
+  const isEscalated = !isFlagged && (msg.content?.includes('escalated') || msg.content?.includes('⚠'))
   const isDone = msg.content?.startsWith('✓')
 
   let contentClass = 'message-content'
-  if (isAgent) contentClass += ' agent-content'
+  if (isAgent && !isFlagged) contentClass += ' agent-content'
   if (isEscalated) contentClass += ' escalated'
   if (isDone) contentClass += ' completed'
+  if (isFlagged) contentClass += ' flagged'
 
   return (
-    <div className="message-row">
-      <div className={`message-avatar avatar-${msg.role || 'system'}`}>
-        {avatarInitial(msg.role || 'system')}
+    <div className={`message-row ${isFlagged ? 'message-row-flagged' : ''}`}>
+      <div className={`message-avatar ${isFlagged ? 'avatar-flagged' : `avatar-${msg.role || 'system'}`}`}>
+        {isFlagged ? '!' : avatarInitial(msg.role || 'system')}
       </div>
       <div className="message-body">
         <div className="message-meta">
-          <span className={`message-author ${isAgent ? 'agent' : msg.role === 'human' ? 'human' : 'system'}`}>
-            {msg.role ? msg.role.charAt(0).toUpperCase() + msg.role.slice(1) : 'System'}
-            {msg.display_name && msg.role === 'human' ? ` · ${msg.display_name}` : ''}
+          <span className={`message-author ${isFlagged ? 'flagged' : isAgent ? 'agent' : msg.role === 'human' ? 'human' : 'system'}`}>
+            {isFlagged ? 'Executor' : (msg.role ? msg.role.charAt(0).toUpperCase() + msg.role.slice(1) : 'System')}
+            {msg.display_name && msg.role === 'human' ? ` — ${msg.display_name}` : ''}
           </span>
+          {isFlagged && <span className="flagged-badge">Flagged</span>}
           <span className="message-time">{fmtTime(msg.timestamp || msg.created_at)}</span>
         </div>
         <div className={contentClass}>{msg.content}</div>
+        {isFlagged && msg.hostname && (
+          <div className="flagged-detail">blocked host {msg.hostname}</div>
+        )}
       </div>
     </div>
   )
@@ -162,6 +178,7 @@ export default function App() {
   const [sending, setSending] = useState(false)
   const [connected, setConnected] = useState(false)
   const [clients, setClients] = useState(1)
+  const [allowedDomains, setAllowedDomains] = useState([])
 
   const wsRef = useRef(null)
   const threadRef = useRef(null)
@@ -195,6 +212,12 @@ export default function App() {
         if (data.type === 'presence') {
           setClients(data.clients)
           return
+        }
+        if (data.type === 'flagged_event') {
+          setMessages(prev => {
+            if (prev.some(m => m.id === data.id || m.audit_id === data.audit_id)) return prev
+            return [...prev, { ...data, timestamp: data.created_at || new Date().toISOString() }]
+          })
         }
         if (data.type === 'agent_message') {
           setMessages(prev => [...prev, { ...data, timestamp: data.created_at || new Date().toISOString() }])
@@ -230,14 +253,43 @@ export default function App() {
     } catch (_) {}
   }, [])
 
-  // Fetch task list on load
+  // Fetch task list, workspace isolation, and prior flagged events
   useEffect(() => {
     const load = async () => {
       try {
-        const r = await fetch(`${API}/workspace/${WORKSPACE_ID}/tasks`)
-        const list = await r.json()
+        const [tasksRes, wsRes, auditRes] = await Promise.all([
+          fetch(`${API}/workspace/${WORKSPACE_ID}/tasks`),
+          fetch(`${API}/workspace/${WORKSPACE_ID}`),
+          fetch(`${API}/workspace/${WORKSPACE_ID}/audit`),
+        ])
+        const list = await tasksRes.json()
         setTasks(list)
         if (list.length > 0) setActiveTaskId(list[0].task_id)
+        const ws = await wsRes.json()
+        if (ws.allowed_domains) setAllowedDomains(ws.allowed_domains)
+        const audit = await auditRes.json()
+        if (Array.isArray(audit)) {
+          const flagged = audit
+            .filter(a => a.event_type === 'domain_blocked')
+            .slice()
+            .reverse()
+            .map(a => ({
+              id: a.id,
+              audit_id: a.id,
+              type: 'flagged_event',
+              flagged: true,
+              event_type: a.event_type,
+              role: 'executor',
+              content: a.payload?.error
+                ? `Blocked navigation to ${a.payload.url || ''}. ${a.payload.error}`
+                : `Blocked navigation to ${a.payload?.url || 'unknown URL'}`,
+              hostname: a.payload?.hostname,
+              url: a.payload?.url,
+              created_at: a.created_at,
+              timestamp: a.created_at,
+            }))
+          setMessages(prev => (prev.length ? prev : flagged))
+        }
       } catch (_) {}
     }
     load()
@@ -296,7 +348,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar participants={participants} wsId={WORKSPACE_ID} />
+      <Sidebar participants={participants} wsId={WORKSPACE_ID} allowedDomains={allowedDomains} />
 
       {/* ── Center Thread ── */}
       <div className="center-pane">

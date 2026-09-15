@@ -5,7 +5,7 @@ Requires docker compose up to be running.
 import pytest
 import httpx
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8100"
 
 
 @pytest.mark.asyncio
