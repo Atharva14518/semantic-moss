@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     moss_project_key: str
     moss_index_name: str = "recall-workspace"
 
+    # Ingest to Moss Cloud is opt-in. Queries still use the shared index.
+    moss_sync_enabled: bool = False
+
     # LLM — Groq (OpenAI-compatible, fast inference)
     groq_api_key: str = ""
     groq_model: str = "qwen/qwen3.8-27b"
@@ -32,6 +35,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
     cors_origins: str = "http://localhost:5175,http://127.0.0.1:5175,http://localhost:5173,http://localhost:3000"
+    benchmark_cache_ttl_s: int = 180
 
     @property
     def allowed_domains_list(self) -> list[str]:

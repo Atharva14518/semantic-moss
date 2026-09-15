@@ -1,0 +1,13 @@
+{
+  "captured_at": "2026-09-15T18:23:53Z",
+  "note": "Live run on the new Moss project. One shared index (recall-workspace). Second POST /benchmark was cached and did not increment live_query_count.",
+  "query": "Recall workspace semantic retrieval latency",
+  "moss_ms": 21.78,
+  "qdrant_ms": 36.22,
+  "moss_hits": 1,
+  "qdrant_hits": 3,
+  "cached_second_call": true,
+  "live_query_count_after_two_posts": 1,
+  "cache_ttl_s": 180,
+  "isolation": "shared_index_metadata_filter"
+}

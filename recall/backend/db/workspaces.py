@@ -13,11 +13,6 @@ from config import get_settings
 logger = logging.getLogger(__name__)
 
 
-def _index_name_for(workspace_id: str) -> str:
-    compact = workspace_id.replace("-", "")[:12]
-    return f"recall-ws-{compact}"
-
-
 async def ensure_workspace(
     session: AsyncSession,
     workspace_id: str,
@@ -44,25 +39,23 @@ async def ensure_workspace(
             "name": display,
             "moss_project_id": cfg.moss_project_id,
             "moss_project_key": cfg.moss_project_key,
-            "moss_index_name": _index_name_for(workspace_id),
+            "moss_index_name": cfg.moss_index_name,
         },
     )
 
-    # Backfill isolation fields on workspaces created before Phase 3.
     await session.execute(
         text("""
             UPDATE workspaces SET
-                moss_project_id = COALESCE(moss_project_id, :moss_project_id),
-                moss_project_key = COALESCE(moss_project_key, :moss_project_key),
-                moss_index_name = COALESCE(moss_index_name, :moss_index_name)
+                moss_project_id = :moss_project_id,
+                moss_project_key = :moss_project_key,
+                moss_index_name = :moss_index_name
             WHERE id = CAST(:id AS uuid)
-              AND (moss_project_id IS NULL OR moss_index_name IS NULL)
         """),
         {
             "id": workspace_id,
             "moss_project_id": cfg.moss_project_id,
             "moss_project_key": cfg.moss_project_key,
-            "moss_index_name": _index_name_for(workspace_id),
+            "moss_index_name": cfg.moss_index_name,
         },
     )
 
