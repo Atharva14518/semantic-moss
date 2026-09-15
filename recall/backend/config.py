@@ -10,10 +10,9 @@ class Settings(BaseSettings):
     moss_project_key: str
     moss_index_name: str = "recall-workspace"
 
-    # LLM — xAI Grok
-    xai_api_key: str = ""
-    xai_base_url: str = "https://api.x.ai/v1"
-    xai_model: str = "grok-4.6"
+    # LLM — Groq (OpenAI-compatible, fast inference)
+    groq_api_key: str = ""
+    groq_model: str = "qwen/qwen3.8-27b"
 
     # Postgres
     database_url: str = "postgresql://recall:recallpass@postgres:5432/recall"
