@@ -1,12 +1,13 @@
 """
 main.py — Recall FastAPI application entry point.
 
-Phase 0 scope:
-  - /health          → full liveness check (Postgres, Redis, Qdrant, Moss)
-  - /health/services → individual service statuses
-  - /moss/test       → explicit Moss round-trip smoke test
-
-Phases 1-5 routers are imported here as stubs and wired in progressively.
+Endpoints:
+  - /health             → full liveness check (Postgres, Redis, Qdrant, Moss)
+  - /health/services    → individual service statuses (cached from startup)
+  - /moss/test          → explicit Moss round-trip smoke test
+  - /workspace/{id}/task        → Phase 1: kick off a LangGraph task
+  - /workspace/{id}/task/{id}   → Phase 1: read persisted task state
+  - /ws/{workspace_id}  → Phase 2: real-time WebSocket sync
 """
 
 import asyncio
@@ -24,6 +25,9 @@ from sqlalchemy import text
 from config import get_settings
 from db.database import get_engine
 from moss_client import get_moss_client
+from routers import tasks as tasks_router
+from agents.graph import checkpointer_context, compile_graph
+from ws.router import router as ws_router
 
 # ── Structured logging setup ─────────────────────────────────────
 structlog.configure(
@@ -55,17 +59,29 @@ async def lifespan(app: FastAPI):
     """Run startup checks; keep references alive for the app lifetime."""
     log.info("recall.startup | environment=%s", cfg.environment)
 
-    results = await _check_all_services()
-    _service_status.update(results)
+    # Hold Postgres checkpointer open for full app lifetime
+    async with checkpointer_context() as checkpointer:
+        try:
+            await checkpointer.setup()  # creates langgraph checkpoint tables
+            app.state.checkpointer = checkpointer
+            app.state.graph = compile_graph(checkpointer)
+            log.info("recall.startup | langgraph checkpointer ready")
+        except Exception as e:
+            log.warning("recall.startup | checkpointer setup failed: %s", e)
+            app.state.checkpointer = None
+            app.state.graph = None
 
-    all_ok = all(v["ok"] for v in results.values())
-    if all_ok:
-        log.info("recall.startup | all services healthy")
-    else:
-        failed = [k for k, v in results.items() if not v["ok"]]
-        log.warning("recall.startup | degraded services=%s", failed)
+        results = await _check_all_services()
+        _service_status.update(results)
 
-    yield
+        all_ok = all(v["ok"] for v in results.values())
+        if all_ok:
+            log.info("recall.startup | all services healthy")
+        else:
+            failed = [k for k, v in results.items() if not v["ok"]]
+            log.warning("recall.startup | degraded services=%s", failed)
+
+        yield
 
     log.info("recall.shutdown")
 
@@ -84,6 +100,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Routers ───────────────────────────────────────────────────────
+app.include_router(tasks_router.router)
+app.include_router(ws_router)
 
 
 # ── Service health checks ─────────────────────────────────────────
