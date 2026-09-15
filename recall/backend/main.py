@@ -24,8 +24,10 @@ from sqlalchemy import text
 
 from config import get_settings
 from db.database import get_engine
+from db.migrate import apply_schema_patches
 from moss_client import get_moss_client
 from routers import tasks as tasks_router
+from routers import security as security_router
 from agents.graph import checkpointer_context, compile_graph
 from ws.router import router as ws_router
 
@@ -58,6 +60,11 @@ _service_status: dict = {}
 async def lifespan(app: FastAPI):
     """Run startup checks; keep references alive for the app lifetime."""
     log.info("recall.startup | environment=%s", cfg.environment)
+
+    try:
+        await apply_schema_patches()
+    except Exception as e:
+        log.warning("recall.startup | schema patches failed: %s", e)
 
     # Hold Postgres checkpointer open for full app lifetime
     async with checkpointer_context() as checkpointer:
@@ -103,6 +110,7 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────
 app.include_router(tasks_router.router)
+app.include_router(security_router.router)
 app.include_router(ws_router)
 
 

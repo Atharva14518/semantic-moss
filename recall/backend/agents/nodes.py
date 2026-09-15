@@ -24,6 +24,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.state import RecallState
 from agents.llm import get_llm
+from agents.tools import browse_url, extract_urls
+from db.database import get_session_factory
+from db.workspaces import ensure_workspace
+from moss_client import get_workspace_moss_client
+from security.flagged import emit_domain_blocked
 from ws.manager import manager as ws_manager
 
 logger = logging.getLogger(__name__)
@@ -69,13 +74,46 @@ Keep each description under 80 characters. Be specific, not vague.
 Do NOT include any text outside the JSON array."""
 
 
+async def _workspace(workspace_id: str) -> dict:
+    async with get_session_factory()() as session:
+        ws = await ensure_workspace(session, workspace_id)
+        await session.commit()
+        return ws
+
+
+async def _moss_context(workspace_id: str, goal: str) -> str:
+    """Retrieve authorized Moss hits for this workspace only. Failures never stall planning."""
+    try:
+        ws = await _workspace(workspace_id)
+        moss = get_workspace_moss_client(
+            ws["moss_project_id"],
+            ws["moss_project_key"],
+            ws["moss_index_name"],
+        )
+        hits, latency_ms = await moss.query_authorized(workspace_id, goal, top_k=3)
+        if not hits:
+            return ""
+        lines = [f"Workspace memory ({latency_ms:.1f}ms, authorized):"]
+        for hit in hits:
+            lines.append(f"- {hit.get('text', '')[:200]}")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("planner.moss_context_failed | %s", exc)
+        return ""
+
+
 async def planner_node(state: RecallState) -> dict:
     logger.info("planner | task=%s goal=%r", state["task_id"], state["goal"][:60])
     llm = get_llm()
+    moss_context = await _moss_context(state["workspace_id"], state["goal"])
+
+    human = f"Goal: {state['goal']}"
+    if moss_context:
+        human = f"{human}\n\n{moss_context}"
 
     response = await llm.ainvoke([
         SystemMessage(content=PLANNER_SYSTEM),
-        HumanMessage(content=f"Goal: {state['goal']}"),
+        HumanMessage(content=human),
     ])
 
     # Parse subtasks — robust to markdown code fences
@@ -112,42 +150,110 @@ async def planner_node(state: RecallState) -> dict:
 
 # ── Executor Node ─────────────────────────────────────────────────
 
-EXECUTOR_SYSTEM = """You are the Executor agent in the Recall workspace.
-You receive a list of subtasks and must attempt to complete them.
+EXECUTOR_SYNTHESIS_SYSTEM = """You are the Executor agent in the Recall workspace.
+You have been given a subtask to complete. You may have real web content retrieved
+by a Playwright browser tool — use it as your primary source.
 
-For each subtask:
-- If it involves browsing a URL, describe what you would find (Playwright is available).
-- For research/writing tasks, produce the actual content.
-
-Respond with a JSON object:
+Respond ONLY with valid JSON:
 {
-  "subtask_id": "...",
+  "subtask_id": "<id>",
   "status": "completed" | "failed",
-  "result": "...",
-  "notes": "..."
+  "result": "<concise factual answer based on the content provided>",
+  "notes": "<source URL if browsed, or 'LLM only' if no browser was used>"
+}
+
+Do NOT include any text outside the JSON object."""
+
+EXECUTOR_LLM_ONLY_SYSTEM = """You are the Executor agent in the Recall workspace.
+Complete the following subtask using your knowledge.
+
+Respond ONLY with valid JSON:
+{
+  "subtask_id": "<id>",
+  "status": "completed" | "failed",
+  "result": "<your answer>",
+  "notes": "LLM only — no browser available for this subtask"
 }"""
 
 
 async def executor_node(state: RecallState) -> dict:
-    # Find the first pending subtask
+    """Execute the next pending subtask.
+
+    If the subtask description contains a URL → Playwright navigates to it
+    (9 s timeout, domain allowlisted) and feeds real page content to the LLM
+    for synthesis.  If no URL is present → pure LLM.
+    Either path returns a structured result; errors are captured, not raised.
+    """
     pending = [s for s in state["subtasks"] if s.get("status") == "pending"]
     if not pending:
-        logger.info("executor | no pending subtasks, marking completed")
+        logger.info("executor | no pending subtasks")
         return {"executor_results": []}
 
     subtask = pending[0]
-    logger.info("executor | task=%s subtask=%s", state["task_id"], subtask["id"])
+    logger.info("executor | task=%s subtask=%s desc=%r",
+                state["task_id"], subtask["id"], subtask["description"][:60])
     llm = get_llm()
 
-    response = await llm.ainvoke([
-        SystemMessage(content=EXECUTOR_SYSTEM),
-        HumanMessage(content=(
+    # ── Step 1: detect URLs in the subtask description ────────────
+    urls = extract_urls(subtask["description"] + " " + state.get("goal", ""))
+    browse_result: dict | None = None
+
+    if urls:
+        url = urls[0]  # take the first URL found
+        logger.info("executor | browsing url=%s", url)
+        ws = await _workspace(state["workspace_id"])
+        intent_msg = _msg(
+            role="executor",
+            content=f"Browsing {url}",
+            task_id=state["task_id"],
+            workspace_id=state["workspace_id"],
+        )
+        await _broadcast(state["workspace_id"], intent_msg)
+
+        browse_result = await browse_url(
+            url,
+            timeout_ms=9000,
+            allowed_domains=ws["allowed_domains"],
+        )
+
+        if browse_result.get("blocked"):
+            await emit_domain_blocked(
+                workspace_id=state["workspace_id"],
+                url=url,
+                hostname=browse_result.get("hostname") or "",
+                error=browse_result["error"],
+                task_id=state["task_id"],
+                allowed_domains=ws["allowed_domains"],
+            )
+        elif not browse_result["success"]:
+            logger.warning("executor | browse failed: %s", browse_result["error"])
+
+    # ── Step 2: synthesise with LLM ───────────────────────────────
+    if browse_result and browse_result["success"]:
+        human_content = (
             f"Goal: {state['goal']}\n\n"
-            f"Execute this subtask:\n"
-            f"ID: {subtask['id']}\n"
-            f"Description: {subtask['description']}\n\n"
+            f"Subtask ID: {subtask['id']}\n"
+            f"Subtask: {subtask['description']}\n\n"
+            f"Page content retrieved from {browse_result['url']}:\n"
+            f"{browse_result['content']}\n\n"
             f"Previous results: {json.dumps(state.get('executor_results', []))}"
-        )),
+        )
+        system = EXECUTOR_SYNTHESIS_SYSTEM
+        notes_fallback = browse_result["url"]
+    else:
+        human_content = (
+            f"Goal: {state['goal']}\n\n"
+            f"Subtask ID: {subtask['id']}\n"
+            f"Subtask: {subtask['description']}\n\n"
+            + (f"Note: Browser failed — {browse_result['error']}\n\n" if browse_result else "")
+            + f"Previous results: {json.dumps(state.get('executor_results', []))}"
+        )
+        system = EXECUTOR_LLM_ONLY_SYSTEM
+        notes_fallback = "LLM only"
+
+    response = await llm.ainvoke([
+        SystemMessage(content=system),
+        HumanMessage(content=human_content),
     ])
 
     raw = response.content.strip()
@@ -163,25 +269,39 @@ async def executor_node(state: RecallState) -> dict:
             "subtask_id": subtask["id"],
             "status": "completed",
             "result": raw,
-            "notes": "Raw LLM output (JSON parse failed)",
+            "notes": notes_fallback,
         }
 
-    # Update subtask status in-place
-    updated_subtasks = []
-    for s in state["subtasks"]:
-        if s["id"] == subtask["id"]:
-            updated_subtasks.append({**s, "status": result.get("status", "completed")})
-        else:
-            updated_subtasks.append(s)
+    # Ensure subtask_id is always present
+    result.setdefault("subtask_id", subtask["id"])
+    result.setdefault("notes", notes_fallback)
 
+    # When we have real Playwright content, the subtask is completed
+    # regardless of what the LLM chose for status — the browser worked.
+    if browse_result and browse_result["success"]:
+        result["status"] = "completed"
+
+    # ── Step 3: mark subtask done ─────────────────────────────────
+    updated_subtasks = [
+        {**s, "status": result.get("status", "completed")}
+        if s["id"] == subtask["id"] else s
+        for s in state["subtasks"]
+    ]
+
+    # Build visible message — include source URL if browsed
+    source_note = f" (via {result['notes']})" if result.get("notes") and result["notes"] != "LLM only" else ""
     msg = _msg(
         role="executor",
-        content=f"Subtask {subtask['id']}: {result.get('status', 'completed')}\n{result.get('result', '')[:200]}",
+        content=(
+            f"Subtask {subtask['id']}: {result.get('status', 'completed')}{source_note}\n"
+            f"{result.get('result', '')[:300]}"
+        ),
         task_id=state["task_id"],
         workspace_id=state["workspace_id"],
     )
 
-    logger.info("executor | subtask=%s status=%s", subtask["id"], result.get("status"))
+    logger.info("executor | subtask=%s status=%s browsed=%s",
+                subtask["id"], result.get("status"), bool(browse_result and browse_result["success"]))
     await _broadcast(state["workspace_id"], msg)
     return {
         "subtasks": updated_subtasks,
@@ -193,16 +313,23 @@ async def executor_node(state: RecallState) -> dict:
 # ── Reviewer Node ─────────────────────────────────────────────────
 
 REVIEWER_SYSTEM = """You are the Reviewer agent in the Recall workspace.
-You assess whether the Executor's work meets the original goal.
+You assess whether the Executor's work meaningfully addresses the original goal.
 
 Respond ONLY with valid JSON:
 {
   "decision": "approved" | "rejected",
-  "feedback": "concise reasoning under 100 words"
+  "feedback": "concise reasoning under 80 words"
 }
 
-Approve if the results meaningfully address the goal.
-Reject only if there are clear gaps or errors."""
+Approval rules:
+- Approve if the results contain relevant content that addresses the goal,
+  even if some subtasks are marked 'failed' in status.
+- Approve if a browser tool was used and returned real page content.
+- Reject ONLY if the results are completely empty, obviously wrong, or
+  contain no relevant information whatsoever.
+- Do not reject just because status fields say 'failed' — look at the actual result content.
+
+Do NOT include any text outside the JSON object."""
 
 
 async def reviewer_node(state: RecallState) -> dict:

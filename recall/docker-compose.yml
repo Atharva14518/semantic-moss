@@ -60,7 +60,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       QDRANT_URL: http://qdrant:6333
     ports:
-      - "8000:8000"
+      # Host 8100 — 8000 is commonly taken by other local APIs
+      - "8100:8000"
     volumes:
       - ./backend:/app
       - moss_cache:/root/.moss

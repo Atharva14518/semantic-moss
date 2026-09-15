@@ -21,6 +21,7 @@ from typing import Any
 from moss import MossClient, DocumentInfo, QueryOptions
 
 from config import get_settings
+from security.moss_authz import authorize_or_empty, scoped_doc_id
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,30 @@ class MossIndexClient:
         )
         return docs, latency_ms
 
+    async def query_authorized(
+        self,
+        workspace_id: str,
+        text: str,
+        top_k: int = 5,
+    ) -> tuple[list[dict[str, Any]], float]:
+        """Query this index, then strip any hit that is not owned by workspace_id."""
+        docs, latency_ms = await self.query(text, top_k=top_k)
+        return authorize_or_empty(workspace_id, docs), latency_ms
+
+    async def add_workspace_documents(
+        self,
+        workspace_id: str,
+        documents: list[dict[str, Any]],
+    ) -> None:
+        scoped = [
+            {
+                "id": scoped_doc_id(workspace_id, d["id"]),
+                "text": d["text"],
+            }
+            for d in documents
+        ]
+        await self.add_documents(scoped)
+
     async def run_round_trip_test(self) -> dict[str, Any]:
         """
         Smoke test: write a known document, query it back, assert it appears.
@@ -173,12 +198,32 @@ class MossIndexClient:
         }
 
 
-# ── Module-level singleton ────────────────────────────────────────
+# ── Module-level clients ──────────────────────────────────────────
 _moss_client: MossIndexClient | None = None
+_workspace_clients: dict[tuple[str, str, str], MossIndexClient] = {}
 
 
 def get_moss_client() -> MossIndexClient:
+    """Default / health-check client. Agents must use get_workspace_moss_client()."""
     global _moss_client
     if _moss_client is None:
         _moss_client = MossIndexClient()
     return _moss_client
+
+
+def get_workspace_moss_client(
+    project_id: str,
+    project_key: str,
+    index_name: str,
+) -> MossIndexClient:
+    """One Moss client per workspace isolation triple — never a global agent index."""
+    key = (project_id, project_key, index_name)
+    client = _workspace_clients.get(key)
+    if client is None:
+        client = MossIndexClient(
+            project_id=project_id,
+            project_key=project_key,
+            index_name=index_name,
+        )
+        _workspace_clients[key] = client
+    return client

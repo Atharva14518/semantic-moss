@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # App
     environment: str = "development"
     log_level: str = "INFO"
-    cors_origins: str = "http://localhost:5173,http://localhost:3000"
+    cors_origins: str = "http://localhost:5175,http://127.0.0.1:5175,http://localhost:5173,http://localhost:3000"
 
     @property
     def allowed_domains_list(self) -> list[str]:
