@@ -20,7 +20,6 @@ from sqlalchemy import text
 from agents.state import RecallState
 from db.database import get_session_factory
 from db.workspaces import ensure_workspace
-from moss_client import get_workspace_moss_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/workspace", tags=["tasks"])
@@ -141,7 +140,7 @@ async def create_task(
     graph = getattr(request.app.state, "graph", None)
 
     async with get_session_factory()() as session:
-        workspace = await ensure_workspace(session, workspace_id)
+        await ensure_workspace(session, workspace_id)
         # Create task row
         await session.execute(
             text("""
@@ -155,20 +154,22 @@ async def create_task(
                 "thread_id": thread_id,
             },
         )
+        await session.execute(
+            text("""
+                INSERT INTO messages (id, workspace_id, task_id, role, content, moss_indexed)
+                VALUES (
+                    CAST(:mid AS uuid), CAST(:wid AS uuid), CAST(:tid AS uuid),
+                    'human', :content, FALSE
+                )
+            """),
+            {
+                "mid": str(uuid.uuid4()),
+                "wid": workspace_id,
+                "tid": task_id,
+                "content": body.goal,
+            },
+        )
         await session.commit()
-
-    try:
-        moss = get_workspace_moss_client(
-            workspace["moss_project_id"],
-            workspace["moss_project_key"],
-            workspace["moss_index_name"],
-        )
-        await moss.add_workspace_documents(
-            workspace_id,
-            [{"id": task_id, "text": f"Task goal: {body.goal}"}],
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("task.moss_index_failed | task=%s error=%s", task_id, exc)
 
     # Start graph in background — returns immediately
     background_tasks.add_task(_run_graph, workspace_id, task_id, thread_id, body.goal, graph)

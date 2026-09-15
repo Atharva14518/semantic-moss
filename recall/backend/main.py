@@ -28,6 +28,7 @@ from db.migrate import apply_schema_patches
 from moss_client import get_moss_client
 from routers import tasks as tasks_router
 from routers import security as security_router
+from routers import benchmark as benchmark_router
 from agents.graph import checkpointer_context, compile_graph
 from ws.router import router as ws_router
 
@@ -81,6 +82,14 @@ async def lifespan(app: FastAPI):
         results = await _check_all_services()
         _service_status.update(results)
 
+        try:
+            from retrieval import qdrant_store
+            from retrieval.corpus import BENCHMARK_DOCS
+            qdrant_store.upsert_docs(BENCHMARK_DOCS)
+            log.info("recall.startup | qdrant benchmark corpus seeded")
+        except Exception as e:
+            log.warning("recall.startup | qdrant seed failed: %s", e)
+
         all_ok = all(v["ok"] for v in results.values())
         if all_ok:
             log.info("recall.startup | all services healthy")
@@ -111,6 +120,7 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────
 app.include_router(tasks_router.router)
 app.include_router(security_router.router)
+app.include_router(benchmark_router.router)
 app.include_router(ws_router)
 
 
@@ -153,14 +163,18 @@ async def _check_moss() -> dict:
     try:
         t0 = time.perf_counter()
         moss = get_moss_client()
-        # Lightweight: ensure index is loaded, then do a single read-only query.
-        # Does NOT upsert or unload — safe to call concurrently from healthchecks.
+        # Load only — a live query here would run on every /health poll and burn quota.
         await moss.ensure_ready()
-        docs, latency_ms = await moss.query("workspace initialized", top_k=1)
+        if moss.quota_exhausted:
+            return {
+                "ok": True,
+                "mode": "quota_exhausted",
+                "note": "Moss Cloud cap reached; live queries are skipped",
+            }
         return {
             "ok": True,
-            "latency_ms": round(latency_ms, 2),
-            "hits": len(docs),
+            "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
+            "mode": "index_loaded",
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -211,8 +225,7 @@ async def health_services():
 @app.get("/moss/test", tags=["moss"])
 async def moss_test():
     """
-    Explicit Moss round-trip: write a test document, query it back.
-    Use this to verify Moss Cloud connectivity at any time.
+    Writes a document to Moss Cloud. Manual smoke test only — not used by the UI.
     """
     moss = get_moss_client()
     result = await moss.run_round_trip_test()

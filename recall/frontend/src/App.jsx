@@ -139,12 +139,12 @@ function TaskPane({ tasks, activeTaskId, onTaskClick }) {
   return (
     <aside className="task-pane">
       <div className="task-pane-header">
-        <div className="task-pane-title">📋 Task Board</div>
+        <div className="task-pane-title">Task Board</div>
       </div>
       <div className="task-pane-body">
+        <BenchmarkPanel />
         {tasks.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-state-icon">🤖</div>
             <div className="empty-state-text">No tasks yet.<br />Submit a goal to start.</div>
           </div>
         ) : (
@@ -159,6 +159,100 @@ function TaskPane({ tasks, activeTaskId, onTaskClick }) {
         )}
       </div>
     </aside>
+  )
+}
+
+const BENCH_TTL_MS = 180_000
+
+function BenchmarkPanel() {
+  const [result, setResult] = useState(null)
+  const [running, setRunning] = useState(false)
+  const [error, setError] = useState('')
+  const [now, setNow] = useState(Date.now())
+
+  // Restore last run from this tab. Do not hit Moss on mount.
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('recall_bench_cache')
+      if (raw) setResult(JSON.parse(raw))
+    } catch (_) {}
+    fetch(`${API}/benchmark/cache`)
+      .then(r => r.json())
+      .then(meta => {
+        if (meta.last && !sessionStorage.getItem('recall_bench_cache')) {
+          setResult({
+            moss_ms: meta.last.moss_ms,
+            qdrant_ms: meta.last.qdrant_ms,
+            query: meta.last.query,
+            cached: true,
+            fetched_at: Date.now() - (meta.cache_age_s || 0) * 1000,
+            cache_ttl_s: meta.cache_ttl_s,
+          })
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  const ageS = result?.fetched_at ? Math.floor((now - result.fetched_at) / 1000) : null
+  const cacheFresh = ageS != null && ageS < (result?.cache_ttl_s || 180)
+
+  const run = async () => {
+    // Guard: never auto-retry. One click → at most one network call; server cache
+    // blocks a live Moss query if another tab just ran the same endpoint.
+    if (running) return
+    if (cacheFresh) {
+      setResult(prev => prev ? { ...prev, cached: true } : prev)
+      return
+    }
+    setRunning(true)
+    setError('')
+    try {
+      const r = await fetch(`${API}/benchmark`, { method: 'POST' })
+      const data = await r.json()
+      const packed = { ...data, fetched_at: Date.now() }
+      sessionStorage.setItem('recall_bench_cache', JSON.stringify(packed))
+      setResult(packed)
+    } catch (e) {
+      setError('Benchmark failed')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="bench-panel">
+      <div className="bench-title">Retrieval</div>
+      <button className="bench-btn" onClick={run} disabled={running}>
+        {running ? 'Running' : cacheFresh ? 'Use cached result' : 'Run benchmark'}
+      </button>
+      {result && (
+        <div className="bench-numbers">
+          <div className="bench-row">
+            <span>Moss</span>
+            <span className="bench-moss">
+              {result.moss_ms == null ? 'n/a' : `${Number(result.moss_ms).toFixed(1)} ms`}
+            </span>
+          </div>
+          <div className="bench-row">
+            <span>Qdrant</span>
+            <span className="bench-qdrant">{Number(result.qdrant_ms).toFixed(1)} ms</span>
+          </div>
+          <div className="bench-note">
+            {result.moss_error
+              ? 'Moss Cloud quota is exhausted. Qdrant number is live; Moss is not called again this session.'
+              : result.cached || cacheFresh
+              ? `Cached — last run ${ageS}s ago. Live Moss is not called again until the ${result.cache_ttl_s || 180}s window ends.`
+              : 'Live run against already-indexed content.'}
+          </div>
+        </div>
+      )}
+      {error && <div className="bench-note bench-error">{error}</div>}
+    </div>
   )
 }
 

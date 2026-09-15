@@ -40,7 +40,8 @@ async def get_workspace(workspace_id: str):
         "moss_project_id": ws["moss_project_id"],
         "moss_index_name": ws["moss_index_name"],
         "allowed_domains": ws["allowed_domains"],
-        "moss_isolated": True,
+        "isolation": "shared_index_metadata_filter",
+        "moss_isolated": False,
     }
 
 
