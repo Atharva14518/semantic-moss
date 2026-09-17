@@ -26,6 +26,45 @@ function fmtTime(iso) {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+function messageIds(message) {
+  return [message?.id, message?.audit_id].filter(Boolean).map(String)
+}
+
+function mergeActivity(current, incoming) {
+  const merged = [...current]
+  const seen = new Set(current.flatMap(messageIds))
+  incoming.forEach(message => {
+    const ids = messageIds(message)
+    if (ids.some(id => seen.has(id))) return
+    merged.push(message)
+    ids.forEach(id => seen.add(id))
+  })
+  return merged.sort((a, b) => {
+    const aTime = Date.parse(a.timestamp || a.created_at || '') || 0
+    const bTime = Date.parse(b.timestamp || b.created_at || '') || 0
+    return aTime - bTime
+  })
+}
+
+function flaggedAuditMessage(audit) {
+  return {
+    id: audit.id,
+    audit_id: audit.id,
+    type: 'flagged_event',
+    flagged: true,
+    event_type: audit.event_type,
+    role: 'executor',
+    task_id: audit.task_id,
+    content: audit.payload?.error
+      ? `Blocked navigation to ${audit.payload.url || ''}. ${audit.payload.error}`
+      : `Blocked navigation to ${audit.payload?.url || 'unknown URL'}`,
+    hostname: audit.payload?.hostname,
+    url: audit.payload?.url,
+    created_at: audit.created_at,
+    timestamp: audit.created_at,
+  }
+}
+
 function avatarInitial(role) {
   const map = { planner: 'P', executor: 'E', reviewer: 'R', system: '⚙', human: DISPLAY_NAME[0].toUpperCase() }
   return map[role] || role[0].toUpperCase()
@@ -305,20 +344,58 @@ export default function App() {
     }
   }, [messages])
 
+  const appendActivity = useCallback((incoming) => {
+    incoming.forEach(message => {
+      messageIds(message).forEach(id => seenMessageIdsRef.current.add(id))
+    })
+    setMessages(prev => mergeActivity(prev, incoming))
+  }, [])
+
+  const rehydrateActivity = useCallback(async () => {
+    const [tasksRes, auditRes] = await Promise.all([
+      fetch(`${API}/workspace/${WORKSPACE_ID}/tasks`),
+      fetch(`${API}/workspace/${WORKSPACE_ID}/audit`),
+    ])
+    if (!tasksRes.ok) throw new Error(await tasksRes.text())
+    if (!auditRes.ok) throw new Error(await auditRes.text())
+
+    const list = await tasksRes.json()
+    const audit = await auditRes.json()
+    const detailedTasks = await Promise.all(list.map(async task => {
+      try {
+        const response = await fetch(`${API}/workspace/${WORKSPACE_ID}/task/${task.task_id}`)
+        if (!response.ok) return task
+        return { ...task, ...await response.json() }
+      } catch (_) {
+        return task
+      }
+    }))
+
+    setTasks(detailedTasks)
+    setActiveTaskId(current => (
+      current && detailedTasks.some(task => task.task_id === current)
+        ? current
+        : detailedTasks[0]?.task_id || null
+    ))
+
+    const persisted = detailedTasks.flatMap(task => task.messages || [])
+    const flagged = Array.isArray(audit)
+      ? audit.filter(event => event.event_type === 'domain_blocked').map(flaggedAuditMessage)
+      : []
+    appendActivity([...persisted, ...flagged])
+  }, [appendActivity])
+
   // LiveKit is the only realtime transport. Its reliable data channel carries
   // versioned activity envelopes; stable event IDs make rendering idempotent.
   useEffect(() => {
     let disposed = false
     const appendEvent = (data) => {
-        if (!['flagged_event', 'agent_message', 'human_message'].includes(data.type)) return
-        const messageId = data.id || data.audit_id
-        if (messageId && seenMessageIdsRef.current.has(messageId)) return
-        if (messageId) seenMessageIdsRef.current.add(messageId)
-        setMessages(prev => [...prev, {
-          ...data,
-          role: data.type === 'human_message' ? 'human' : data.role,
-          timestamp: data.timestamp || data.created_at || new Date().toISOString(),
-        }])
+      if (!['flagged_event', 'agent_message', 'human_message'].includes(data.type)) return
+      appendActivity([{
+        ...data,
+        role: data.type === 'human_message' ? 'human' : data.role,
+        timestamp: data.timestamp || data.created_at || new Date().toISOString(),
+      }])
     }
     const connect = async () => {
       try {
@@ -339,6 +416,12 @@ export default function App() {
         room.on(RoomEvent.ParticipantConnected, updatePresence)
         room.on(RoomEvent.ParticipantDisconnected, updatePresence)
         room.on(RoomEvent.Disconnected, () => !disposed && setConnected(false))
+        room.on(RoomEvent.Reconnected, () => {
+          if (disposed) return
+          setConnected(true)
+          updatePresence()
+          rehydrateActivity().catch(error => console.error('Activity rehydration failed', error))
+        })
         await room.connect(credentials.url, credentials.token)
         if (!disposed) {
           setConnected(true)
@@ -354,7 +437,7 @@ export default function App() {
       disposed = true
       roomRef.current?.disconnect()
     }
-  }, [])
+  }, [appendActivity, rehydrateActivity])
 
   // Poll active task for updates
   const pollTask = useCallback(async (taskId) => {
@@ -362,54 +445,23 @@ export default function App() {
       const r = await fetch(`${API}/workspace/${WORKSPACE_ID}/task/${taskId}`)
       const t = await r.json()
       setTasks(prev => prev.map(x => x.task_id === taskId ? { ...x, ...t } : x))
+      appendActivity(t.messages || [])
       if (['completed', 'escalated', 'failed'].includes(t.status)) {
         clearInterval(pollRef.current)
       }
     } catch (_) {}
-  }, [])
+  }, [appendActivity])
 
-  // Fetch task list, workspace isolation, and prior flagged events
+  // Fetch workspace settings plus durable task/audit history on initial load.
   useEffect(() => {
-    const load = async () => {
-      try {
-        const [tasksRes, wsRes, auditRes] = await Promise.all([
-          fetch(`${API}/workspace/${WORKSPACE_ID}/tasks`),
-          fetch(`${API}/workspace/${WORKSPACE_ID}`),
-          fetch(`${API}/workspace/${WORKSPACE_ID}/audit`),
-        ])
-        const list = await tasksRes.json()
-        setTasks(list)
-        if (list.length > 0) setActiveTaskId(list[0].task_id)
-        const ws = await wsRes.json()
-        if (ws.allowed_domains) setAllowedDomains(ws.allowed_domains)
-        const audit = await auditRes.json()
-        if (Array.isArray(audit)) {
-          const flagged = audit
-            .filter(a => a.event_type === 'domain_blocked')
-            .slice()
-            .reverse()
-            .map(a => ({
-              id: a.id,
-              audit_id: a.id,
-              type: 'flagged_event',
-              flagged: true,
-              event_type: a.event_type,
-              role: 'executor',
-              content: a.payload?.error
-                ? `Blocked navigation to ${a.payload.url || ''}. ${a.payload.error}`
-                : `Blocked navigation to ${a.payload?.url || 'unknown URL'}`,
-              hostname: a.payload?.hostname,
-              url: a.payload?.url,
-              created_at: a.created_at,
-              timestamp: a.created_at,
-            }))
-          flagged.forEach(message => seenMessageIdsRef.current.add(message.id || message.audit_id))
-          setMessages(prev => (prev.length ? prev : flagged))
-        }
-      } catch (_) {}
-    }
-    load()
-  }, [])
+    rehydrateActivity().catch(error => console.error('Activity rehydration failed', error))
+    fetch(`${API}/workspace/${WORKSPACE_ID}`)
+      .then(response => response.json())
+      .then(workspace => {
+        if (workspace.allowed_domains) setAllowedDomains(workspace.allowed_domains)
+      })
+      .catch(() => {})
+  }, [rehydrateActivity])
 
   const handleSend = async () => {
     if (!goal.trim() || sending) return

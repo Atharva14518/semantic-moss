@@ -8,6 +8,7 @@ GET  /workspace/{id}                  → workspace isolation metadata (key reda
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from urllib.parse import urlparse
 
@@ -19,6 +20,7 @@ from agents.tools import browse_url
 from db.database import get_session_factory
 from db.workspaces import ensure_workspace
 from moss_client import get_workspace_moss_client
+from retrieval import qdrant_store
 from security.audit import list_audit
 from security.flagged import emit_domain_blocked
 from security.moss_authz import scoped_doc_id
@@ -36,6 +38,7 @@ class ErasureResponse(BaseModel):
     workspace_id: str
     postgres_deleted: dict[str, int]
     moss_deleted: int
+    qdrant_deleted: int = 0
 
 
 async def _workspace_document_ids(workspace_id: str) -> list[str]:
@@ -71,15 +74,24 @@ async def get_audit(workspace_id: str):
 
 @router.delete("/{workspace_id}/data", response_model=ErasureResponse)
 async def erase_workspace_data(workspace_id: str):
-    """Erase one workspace's Postgres rows and its known Moss documents.
+    """Erase one workspace from Moss, Qdrant, and Postgres.
 
-    The SDK deletes Moss documents by ID, so those scoped IDs are collected
-    from Postgres first. If Moss deletion fails, Postgres is left untouched.
+    Moss document IDs are collected from Postgres first. Destructive writes
+    remain Moss-first and fail closed: if Moss or Qdrant rejects deletion,
+    Postgres (including LangGraph checkpoints) is left untouched.
     """
     document_ids = await _workspace_document_ids(workspace_id)
     moss_deleted = await get_workspace_moss_client().delete_documents(document_ids)
+    qdrant_deleted = await asyncio.to_thread(qdrant_store.delete_workspace_documents, workspace_id)
 
+    task_threads = """
+        SELECT langgraph_thread_id FROM tasks
+        WHERE workspace_id = CAST(:wid AS uuid) AND langgraph_thread_id IS NOT NULL
+    """
     statements = {
+        "checkpoint_writes": f"DELETE FROM checkpoint_writes WHERE thread_id IN ({task_threads})",
+        "checkpoint_blobs": f"DELETE FROM checkpoint_blobs WHERE thread_id IN ({task_threads})",
+        "checkpoints": f"DELETE FROM checkpoints WHERE thread_id IN ({task_threads})",
         "audit_logs": "DELETE FROM audit_logs WHERE workspace_id = CAST(:wid AS uuid)",
         "messages": "DELETE FROM messages WHERE workspace_id = CAST(:wid AS uuid)",
         "tasks": "DELETE FROM tasks WHERE workspace_id = CAST(:wid AS uuid)",
@@ -92,8 +104,19 @@ async def erase_workspace_data(workspace_id: str):
             result = await session.execute(text(statement), {"wid": workspace_id})
             counts[name] = result.rowcount or 0
         await session.commit()
-    logger.warning("workspace.data_erased | workspace=%s moss_docs=%d", workspace_id, moss_deleted)
-    return ErasureResponse(workspace_id=workspace_id, postgres_deleted=counts, moss_deleted=moss_deleted)
+    logger.warning(
+        "workspace.data_erased | workspace=%s moss_docs=%d qdrant_docs=%d postgres_rows=%d",
+        workspace_id,
+        moss_deleted,
+        qdrant_deleted,
+        sum(counts.values()),
+    )
+    return ErasureResponse(
+        workspace_id=workspace_id,
+        postgres_deleted=counts,
+        moss_deleted=moss_deleted,
+        qdrant_deleted=qdrant_deleted,
+    )
 
 
 @router.post("/{workspace_id}/executor/browse")

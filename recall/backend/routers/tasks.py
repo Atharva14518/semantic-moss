@@ -46,6 +46,24 @@ class TaskResponse(BaseModel):
     human_message_id: str | None = None
 
 
+def _message_response(row: Any) -> dict[str, Any]:
+    """Shape a persisted message like the corresponding realtime event."""
+    metadata = row.metadata if isinstance(row.metadata, dict) else {}
+    created_at = row.created_at.isoformat() if row.created_at else None
+    return {
+        **metadata,
+        "id": str(row.id),
+        "workspace_id": str(row.workspace_id),
+        "task_id": str(row.task_id) if row.task_id else None,
+        "role": row.role,
+        "content": row.content,
+        "metadata": metadata,
+        "reasoning": metadata.get("reasoning"),
+        "created_at": created_at,
+        "timestamp": created_at,
+    }
+
+
 # ── Background runner ─────────────────────────────────────────────
 
 async def _run_graph(
@@ -213,9 +231,20 @@ async def get_task(workspace_id: str, task_id: str):
             {"id": task_id, "wid": workspace_id},
         )
         row = result.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Task not found")
 
-    if not row:
-        raise HTTPException(status_code=404, detail="Task not found")
+        message_result = await session.execute(
+            text("""
+                SELECT id, workspace_id, task_id, role, content, metadata, created_at
+                FROM messages
+                WHERE task_id = CAST(:id AS uuid)
+                  AND workspace_id = CAST(:wid AS uuid)
+                ORDER BY created_at ASC, id ASC
+            """),
+            {"id": task_id, "wid": workspace_id},
+        )
+        messages = [_message_response(message) for message in message_result.fetchall()]
 
     return TaskResponse(
         task_id=str(row.id),
@@ -224,6 +253,7 @@ async def get_task(workspace_id: str, task_id: str):
         goal=row.goal,
         langgraph_thread_id=row.langgraph_thread_id,
         subtasks=row.subtasks or [],
+        messages=messages,
         final_result=row.result.get("summary") if row.result else None,
         error=row.error,
     )

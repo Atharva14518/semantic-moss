@@ -9,7 +9,15 @@ from typing import Any
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    FilterSelector,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 from config import get_settings
 
@@ -49,6 +57,33 @@ def ensure_collection() -> None:
                 vectors_config=VectorParams(size=DIM, distance=Distance.COSINE),
             )
             logger.info("qdrant.collection_created | name=%s", cfg.qdrant_collection)
+
+
+def delete_workspace_documents(workspace_id: str) -> int:
+    """Delete only documents belonging to ``workspace_id`` from cold storage."""
+    cfg = get_settings()
+    client = get_qdrant()
+    if not client.collection_exists(cfg.qdrant_collection):
+        return 0
+
+    workspace_filter = Filter(
+        must=[FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id))]
+    )
+    count = client.count(
+        collection_name=cfg.qdrant_collection,
+        count_filter=workspace_filter,
+        exact=True,
+    ).count
+    if not count:
+        return 0
+
+    client.delete(
+        collection_name=cfg.qdrant_collection,
+        points_selector=FilterSelector(filter=workspace_filter),
+        wait=True,
+    )
+    logger.info("qdrant.delete_workspace_documents | workspace=%s count=%d", workspace_id, count)
+    return count
 
 
 def upsert_docs(documents: list[dict[str, Any]]) -> None:

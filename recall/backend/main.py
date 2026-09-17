@@ -7,7 +7,7 @@ Endpoints:
   - /moss/test          → explicit Moss round-trip smoke test
   - /workspace/{id}/task        → Phase 1: kick off a LangGraph task
   - /workspace/{id}/task/{id}   → Phase 1: read persisted task state
-  - /ws/{workspace_id}  → Phase 2: real-time WebSocket sync
+  - /v1/workspace/{id}/token → scoped LiveKit room credentials
 """
 
 import asyncio
@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from config import get_settings
-from db.database import get_engine
+from db.database import close_engine, get_engine
 from db.migrate import apply_schema_patches
 from moss_client import get_moss_client
 from routers import tasks as tasks_router
@@ -97,9 +97,11 @@ async def lifespan(app: FastAPI):
             failed = [k for k, v in results.items() if not v["ok"]]
             log.warning("recall.startup | degraded services=%s", failed)
 
-        yield
-
-    log.info("recall.shutdown")
+        try:
+            yield
+        finally:
+            await close_engine()
+            log.info("recall.shutdown | database engine disposed")
 
 
 app = FastAPI(

@@ -16,9 +16,9 @@ Recall gives humans and a team of specialized AI agents — **Planner**, **Execu
 - **Fast shared context** — Moss provides sub-10ms-target semantic recall, benchmarked live against a Qdrant cold-storage path rather than assumed.
 - **Intelligent routing** — a lightweight classifier distinguishes *context/recall questions* (answered directly from Moss, bypassing the agent pipeline) from *actionable goals* (routed through the full Planner → Executor → Reviewer flow).
 - **Reliable escalation** — an empty Planner output escalates to a human immediately; a task that fails Reviewer validation three times escalates automatically.
-- **Web-capable agents, safely scoped** — the Executor can browse via Playwright, restricted to a domain allowlist, and can search the web via the Serper API.
+- **Web-capable agents, safely scoped** — the Executor can browse official sources via Playwright, restricted to a per-workspace domain allowlist.
 - **Decision explainability** — every agent decision is logged with a structured `reasoning` field, surfaced through a "Why?" affordance in the activity thread.
-- **Data rights, built in** — a dedicated compliance layer supports workspace data erasure across both Postgres and the Moss index.
+- **Data rights, built in** — a dedicated compliance layer erases workspace application rows, LangGraph checkpoints, Moss documents, and Qdrant vectors.
 - **Cost-aware by design** — retrieval is on-demand only (never polled or auto-triggered), and the benchmark panel is manually triggered and cached to respect metered API usage.
 - **12-factor aligned** — environment-based config, a stateless orchestrator (all task state is Postgres-checkpointed via LangGraph), and disposable containers.
 
@@ -53,7 +53,7 @@ graph LR
     subgraph CrossCutting["Cross-Cutting Layers"]
         COMP[Compliance]
         EXP[Explainability]
-        OTEL[OTel Tracing]
+
     end
 
     H <--> LK
@@ -68,7 +68,6 @@ graph LR
     PG -. "async batched sync" .-> MOSS
     RR --> COMP
     RR --> EXP
-    RR --> OTEL
 ```
 
 ## Tech Stack
@@ -83,8 +82,8 @@ graph LR
 | Cold storage | Qdrant |
 | Durable state | PostgreSQL |
 | Coordination | Redis |
-| Tools | Playwright (domain-allowlisted), Serper API |
-| Observability | OpenTelemetry, Honeycomb/Jaeger |
+| Tools | Playwright (domain-allowlisted) |
+| Observability | Structured application logs; OpenTelemetry is planned for Phase 7 |
 
 ## How It Works
 
@@ -93,6 +92,7 @@ graph LR
 3. An actionable goal instead enters the **Planner → Executor → Reviewer** loop. The Planner breaks it into subtasks; the Executor carries them out (including web browsing/search where needed); the Reviewer validates the result.
 4. If the Planner returns no subtasks, or the Reviewer rejects the result three times, the task escalates to a human.
 5. Every step is broadcast live via LiveKit to all connected participants, logged to Postgres (with a `reasoning` field for explainability), and asynchronously indexed into Moss for future recall.
+6. On initial load or LiveKit reconnect, the UI re-fetches durable task activity so missed messages and their `reasoning` remain available.
 
 ## Getting Started
 
@@ -140,11 +140,12 @@ Open the app in two browser tabs on the same workspace to see real-time multipla
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/v1/workspace/{id}/task` | Submit a goal — automatically routed to the agent pipeline or answered directly, depending on intent |
-| `GET` | `/v1/workspace/{id}/recall` | Direct context/history query, bypassing the agent pipeline |
+| `POST` | `/workspace/{id}/task` | Submit a goal — automatically routed to the agent pipeline or answered directly, depending on intent |
+| `GET` | `/workspace/{id}/task/{task_id}` | Fetch durable task state and activity history |
+| `GET` | `/workspace/{id}/tasks` | List recent workspace tasks |
 | `GET` | `/v1/workspace/{id}/token` | Fetch a short-lived, scoped LiveKit access token |
-| `DELETE` | `/v1/workspace/{id}/data` | Erase a workspace's data from Postgres and Moss (right to erasure) |
-| `POST` | `/v1/benchmark` | Trigger a manual, cached latency comparison between Moss and Qdrant |
+| `DELETE` | `/workspace/{id}/data` | Erase workspace data from Postgres, LangGraph checkpoints, Moss, and Qdrant |
+| `POST` | `/benchmark` | Trigger a manual, cached latency comparison between Moss and Qdrant |
 
 ## Project Structure
 
@@ -180,7 +181,7 @@ Being upfront about what's simplified for the hackathon build:
 
 - **Tenant isolation is logical, not physical.** All workspaces share a single Moss index, isolated via `workspace_id` metadata filtering plus an orchestrator-side authorization check — not separate per-tenant Moss projects. This is a deliberate trade-off driven by trial-tier budget/index limits, not an oversight.
 - **Retention policy is documented, not fully enforced.** A 30-day retention policy is defined for workspace history; automated purging isn't built yet — only the on-demand erasure endpoint is.
-- **Sync is batched, not event-driven.** The Postgres → Moss sync worker runs on batched polling (Celery/Redis), not change-data-capture.
+- **Sync is batched, not event-driven.** Postgres → Moss indexing uses the batch sync path rather than change-data-capture; production scheduling remains deployment work.
 
 ## License
 
