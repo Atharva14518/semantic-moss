@@ -14,7 +14,9 @@ _STATEMENTS = [
     "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS moss_project_id TEXT",
     "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS moss_project_key TEXT",
     "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS moss_index_name TEXT",
-    "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS allowed_domains TEXT[] DEFAULT ARRAY['wikipedia.org','github.com','docs.python.org']",
+    "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS allowed_domains TEXT[] DEFAULT ARRAY['wikipedia.org','github.com','docs.python.org','nodejs.org']",
+    "ALTER TABLE workspaces ALTER COLUMN allowed_domains SET DEFAULT ARRAY['wikipedia.org','github.com','docs.python.org','nodejs.org']",
+    "UPDATE workspaces SET allowed_domains = array_append(allowed_domains, 'nodejs.org') WHERE allowed_domains IS NOT NULL AND NOT ('nodejs.org' = ANY(allowed_domains))",
 ]
 
 

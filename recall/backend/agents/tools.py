@@ -20,6 +20,23 @@ logger = logging.getLogger(__name__)
 
 _URL_RE = re.compile(r'https?://[^\s<>"\']+', re.IGNORECASE)
 
+# A deliberately small set of canonical documentation routes.  This lets the
+# executor perform an explicitly requested official-docs lookup even when the
+# planner describes a site by name rather than pasting a URL.  It is not a
+# general web-search facility: any resolved URL still goes through the
+# workspace's domain allowlist in ``browse_url``.
+_OFFICIAL_DOCS = (
+    (
+        re.compile(r"\bnode\.?js\b", re.IGNORECASE),
+        "https://nodejs.org/en/download",
+    ),
+)
+
+_WEB_LOOKUP_LANGUAGE = re.compile(
+    r"\b(?:browse|download|docs?|documentation|latest|navigate|official|release|version|visit)\b",
+    re.IGNORECASE,
+)
+
 
 def extract_urls(text: str) -> list[str]:
     """Return all http/https URLs found in `text`."""
@@ -28,6 +45,21 @@ def extract_urls(text: str) -> list[str]:
     for url in urls:
         cleaned.append(url.rstrip(".,);]}>'\" "))
     return cleaned
+
+
+def infer_official_docs_url(text: str) -> str | None:
+    """Return a safe canonical URL for an explicit official-docs request.
+
+    Planner subtasks often say "navigate to the Node.js docs" without a URL.
+    Resolving only known official sites avoids silently replacing browsing with
+    model knowledge while keeping browser access constrained and auditable.
+    """
+    if not _WEB_LOOKUP_LANGUAGE.search(text):
+        return None
+    for product_pattern, url in _OFFICIAL_DOCS:
+        if product_pattern.search(text):
+            return url
+    return None
 
 
 async def browse_url(

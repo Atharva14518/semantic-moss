@@ -29,8 +29,8 @@ from moss_client import get_moss_client
 from routers import tasks as tasks_router
 from routers import security as security_router
 from routers import benchmark as benchmark_router
+from routers import realtime as realtime_router
 from agents.graph import checkpointer_context, compile_graph
-from ws.router import router as ws_router
 
 # ── Structured logging setup ─────────────────────────────────────
 structlog.configure(
@@ -121,7 +121,7 @@ app.add_middleware(
 app.include_router(tasks_router.router)
 app.include_router(security_router.router)
 app.include_router(benchmark_router.router)
-app.include_router(ws_router)
+app.include_router(realtime_router.router)
 
 
 # ── Service health checks ─────────────────────────────────────────

@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     # LLM — Groq (OpenAI-compatible, fast inference)
     groq_api_key: str = ""
     groq_model: str = "qwen/qwen3.8-27b"
+    # Keep each agent call safely below Groq's 1,000 OTPM trial limit.
+    groq_max_tokens: int = 512
+
+    # LiveKit - the sole realtime transport for workspace events.
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
 
     # Postgres
     database_url: str = "postgresql://recall:recallpass@postgres:5432/recall"
@@ -29,12 +36,12 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = "change_me"
-    allowed_domains: str = "wikipedia.org,github.com,docs.python.org"
+    allowed_domains: str = "wikipedia.org,github.com,docs.python.org,nodejs.org"
 
     # App
     environment: str = "development"
     log_level: str = "INFO"
-    cors_origins: str = "http://localhost:5175,http://127.0.0.1:5175,http://localhost:5173,http://localhost:3000"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     benchmark_cache_ttl_s: int = 180
 
     @property

@@ -182,6 +182,27 @@ class MossIndexClient:
         ]
         await self.add_documents(scoped)
 
+    async def delete_documents(self, document_ids: list[str]) -> int:
+        """Delete known workspace document IDs from the shared Moss index.
+
+        The Moss SDK deletes by ID rather than metadata filter. Callers must
+        obtain IDs from Postgres first; this prevents a workspace deletion from
+        touching another tenant's documents in the shared index.
+        """
+        if not document_ids:
+            return 0
+        await self.ensure_ready()
+        # Deletion is a data-rights operation, not normal workload. Attempt it
+        # even when the query circuit is open due to trial quota; if Moss
+        # rejects the operation, let the caller fail closed before Postgres is
+        # touched.
+        try:
+            await self._client.delete_docs(self._index_name, document_ids)
+        except Exception as exc:
+            raise RuntimeError("Moss rejected workspace data erasure") from exc
+        logger.info("moss.delete_documents | count=%d", len(document_ids))
+        return len(document_ids)
+
     async def run_round_trip_test(self) -> dict[str, Any]:
         """Writes to Moss Cloud. Do not call from health, UI, or loops."""
         if self.quota_exhausted:

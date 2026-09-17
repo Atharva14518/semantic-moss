@@ -23,6 +23,8 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from agents.state import RecallState
 from agents.nodes import (
     planner_node,
+    classify_request_node,
+    recall_node,
     executor_node,
     reviewer_node,
     escalate_node,
@@ -44,6 +46,15 @@ def route_after_executor(state: RecallState) -> str:
     return "reviewer"
 
 
+def route_after_classification(state: RecallState) -> str:
+    return "recall" if state.get("request_type") == "recall" else "planner"
+
+
+def route_after_planner(state: RecallState) -> str:
+    """An empty plan is terminal; do not spend three review attempts on it."""
+    return "escalate" if not state.get("subtasks") else "executor"
+
+
 def route_after_reviewer(state: RecallState) -> str:
     """After reviewer: approve → finalise, reject → retry or escalate."""
     decision = state.get("review_status", "")
@@ -62,15 +73,24 @@ def build_graph() -> StateGraph:
     """Construct the LangGraph StateGraph (no checkpointer attached here)."""
     g = StateGraph(RecallState)
 
+    g.add_node("classify", classify_request_node)
+    g.add_node("recall", recall_node)
     g.add_node("planner", planner_node)
     g.add_node("executor", executor_node)
     g.add_node("reviewer", reviewer_node)
     g.add_node("escalate", escalate_node)
     g.add_node("finalise", finalise_node)
 
-    g.set_entry_point("planner")
+    g.set_entry_point("classify")
 
-    g.add_edge("planner", "executor")
+    g.add_conditional_edges("classify", route_after_classification, {
+        "recall": "recall",
+        "planner": "planner",
+    })
+    g.add_conditional_edges("planner", route_after_planner, {
+        "executor": "executor",
+        "escalate": "escalate",
+    })
 
     g.add_conditional_edges("executor", route_after_executor, {
         "executor": "executor",
@@ -83,6 +103,7 @@ def build_graph() -> StateGraph:
     })
 
     g.add_edge("finalise", END)
+    g.add_edge("recall", END)
     g.add_edge("escalate", END)
 
     return g

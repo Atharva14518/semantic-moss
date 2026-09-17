@@ -5,9 +5,19 @@ Allowlist unit tests live in test_phase3.py so they run without Settings/.env.
 """
 
 import pytest
-from agents.tools import browse_url
+from agents.tools import browse_url, infer_official_docs_url
 
 ALLOW = ["wikipedia.org", "github.com", "docs.python.org"]
+
+
+def test_infers_nodejs_official_download_page_from_natural_language():
+    assert infer_official_docs_url("Navigate to the official Node.js documentation website") == (
+        "https://nodejs.org/en/download"
+    )
+
+
+def test_does_not_infer_site_without_an_explicit_web_lookup_request():
+    assert infer_official_docs_url("Summarize what Node.js is") is None
 
 
 @pytest.mark.asyncio
