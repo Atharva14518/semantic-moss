@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -24,22 +25,45 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.state import RecallState
 from agents.llm import get_llm
-from agents.tools import browse_url, extract_urls
+from agents.tools import browse_url, extract_urls, infer_official_docs_url
 from db.database import get_session_factory
 from db.workspaces import ensure_workspace
 from moss_client import get_workspace_moss_client
+from realtime import publish_event
+from security.flagged import persist_message
 from security.flagged import emit_domain_blocked
-from ws.manager import manager as ws_manager
 
 logger = logging.getLogger(__name__)
 
 MAX_REVIEW_ATTEMPTS = 3
 
+# Keep this deliberately narrow: requests to *summarise a subject* are tasks,
+# while requests to recall this workspace/session take the memory route.
+_RECALL_REQUEST = re.compile(
+    r"\b(?:what (?:did|have) we (?:discuss|talk(?:ed)? about)|"
+    r"(?:show|give|tell me|provide) (?:the )?(?:chat |session |workspace )?"
+    r"(?:context|recap|summary)|"
+    r"(?:context|recap|summary) (?:of|for) (?:this|the) (?:chat|session|workspace)|"
+    r"what happened so far|bring me up to speed)\b",
+    re.IGNORECASE,
+)
+
 
 async def _broadcast(workspace_id: str, msg: dict) -> None:
-    """Fire-and-forget broadcast; never crashes a node if WS fails."""
+    """Persist a concise decision rationale, then broadcast the activity event."""
     try:
-        await ws_manager.broadcast(workspace_id, {"type": "agent_message", **msg})
+        await persist_message(
+            workspace_id=workspace_id,
+            task_id=msg.get("task_id"),
+            role=msg.get("role", "system"),
+            content=msg["content"],
+            message_id=msg["id"],
+            metadata={"reasoning": msg.get("reasoning", "")},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("message.persist_failed | %s", exc)
+    try:
+        await publish_event(workspace_id, {"type": "agent_message", **msg})
     except Exception as exc:  # noqa: BLE001
         logger.warning("ws.broadcast_failed | %s", exc)
 
@@ -56,6 +80,7 @@ def _msg(role: str, content: str, task_id: str, workspace_id: str) -> dict:
         "task_id": task_id,
         "workspace_id": workspace_id,
         "created_at": _now(),
+        "reasoning": "",
     }
 
 
@@ -102,6 +127,62 @@ async def _moss_context(workspace_id: str, goal: str) -> str:
         return ""
 
 
+async def classify_request_node(state: RecallState) -> dict:
+    """Route explicit workspace-memory questions away from task planning.
+
+    This local heuristic is intentionally free and deterministic. It avoids an
+    extra LLM call for every task while keeping subject-matter summaries on the
+    normal Planner → Executor → Reviewer path.
+    """
+    request_type = "recall" if _RECALL_REQUEST.search(state["goal"].strip()) else "task"
+    logger.info("classify | task=%s request_type=%s", state["task_id"], request_type)
+    return {"request_type": request_type}
+
+
+RECALL_SYSTEM = """You answer questions about the current Recall workspace.
+Use only the retrieved workspace memory below. Give a direct, concise answer.
+If the memory does not contain enough information, say that clearly; do not
+invent events or claims."""
+
+
+async def recall_node(state: RecallState) -> dict:
+    """Answer a workspace-context question with exactly one Moss query."""
+    logger.info("recall | task=%s", state["task_id"])
+    context = "No matching workspace memory was retrieved."
+    try:
+        ws = await _workspace(state["workspace_id"])
+        moss = get_workspace_moss_client(
+            ws["moss_project_id"], ws["moss_project_key"], ws["moss_index_name"],
+        )
+        hits, latency_ms = await moss.query_authorized(
+            state["workspace_id"], state["goal"], top_k=5, reason="recall_retrieval",
+        )
+        if hits:
+            context = "\n".join(f"- {hit.get('text', '')[:1000]}" for hit in hits)
+        logger.info("recall | moss_hits=%d latency_ms=%.1f", len(hits), latency_ms)
+    except Exception as exc:  # noqa: BLE001
+        # A retrieval outage should still result in a completed, transparent
+        # answer rather than sending a context question through task review.
+        logger.warning("recall.moss_context_failed | %s", exc)
+
+    response = await get_llm().ainvoke([
+        SystemMessage(content=RECALL_SYSTEM),
+        HumanMessage(content=f"Question: {state['goal']}\n\nWorkspace memory:\n{context}"),
+    ])
+    answer = response.content.strip()
+    msg = _msg(
+        role="system", content=f"✓ Context recalled.\n{answer}",
+        task_id=state["task_id"], workspace_id=state["workspace_id"],
+    )
+    msg["reasoning"] = "Classified the request as workspace recall and answered only from authorized retrieved context."
+    await _broadcast(state["workspace_id"], msg)
+    return {
+        "review_status": "approved",
+        "final_result": answer,
+        "messages": [msg],
+    }
+
+
 async def planner_node(state: RecallState) -> dict:
     logger.info("planner | task=%s goal=%r", state["task_id"], state["goal"][:60])
     llm = get_llm()
@@ -137,6 +218,7 @@ async def planner_node(state: RecallState) -> dict:
         task_id=state["task_id"],
         workspace_id=state["workspace_id"],
     )
+    msg["reasoning"] = f"Decomposed the actionable goal into {len(subtasks)} concrete subtask(s)."
 
     logger.info("planner | subtasks=%d", len(subtasks))
     await _broadcast(state["workspace_id"], msg)
@@ -144,6 +226,7 @@ async def planner_node(state: RecallState) -> dict:
         "subtasks": subtasks,
         "review_attempts": 0,
         "review_status": "",
+        "review_feedback": "Planner returned no actionable subtasks." if not subtasks else "",
         "messages": [msg],
     }
 
@@ -194,8 +277,14 @@ async def executor_node(state: RecallState) -> dict:
                 state["task_id"], subtask["id"], subtask["description"][:60])
     llm = get_llm()
 
-    # ── Step 1: detect URLs in the subtask description ────────────
-    urls = extract_urls(subtask["description"] + " " + state.get("goal", ""))
+    # ── Step 1: detect an explicit URL or a known official-docs request ──
+    request_text = subtask["description"] + " " + state.get("goal", "")
+    urls = extract_urls(request_text)
+    if not urls:
+        official_url = infer_official_docs_url(request_text)
+        if official_url:
+            urls = [official_url]
+            logger.info("executor | resolved official docs request | url=%s", official_url)
     browse_result: dict | None = None
 
     if urls:
@@ -299,6 +388,10 @@ async def executor_node(state: RecallState) -> dict:
         task_id=state["task_id"],
         workspace_id=state["workspace_id"],
     )
+    msg["reasoning"] = (
+        f"Completed subtask {subtask['id']} using "
+        f"{'an allowlisted browser source' if browse_result and browse_result['success'] else 'the configured LLM path'}."
+    )
 
     logger.info("executor | subtask=%s status=%s browsed=%s",
                 subtask["id"], result.get("status"), bool(browse_result and browse_result["success"]))
@@ -370,6 +463,7 @@ async def reviewer_node(state: RecallState) -> dict:
         task_id=state["task_id"],
         workspace_id=state["workspace_id"],
     )
+    msg["reasoning"] = feedback or "Reviewer found the result sufficient for the original goal."
 
     logger.info("reviewer | attempt=%d decision=%s", attempts, decision)
     await _broadcast(state["workspace_id"], msg)
@@ -389,15 +483,25 @@ async def escalate_node(state: RecallState) -> dict:
         state["task_id"],
         state.get("review_attempts", 0),
     )
+    attempts = state.get("review_attempts", 0)
+    if attempts == 0 and not state.get("subtasks"):
+        content = "⚠ Task escalated: Planner returned no actionable subtasks.\nHuman review required."
+    else:
+        content = (
+            f"⚠ Task escalated after {attempts} failed review passes.\n"
+            f"Last feedback: {state.get('review_feedback', 'N/A')}\n"
+            "Human review required."
+        )
     msg = _msg(
         role="system",
-        content=(
-            f"⚠ Task escalated after {state.get('review_attempts', 0)} failed review passes.\n"
-            f"Last feedback: {state.get('review_feedback', 'N/A')}\n"
-            f"Human review required."
-        ),
+        content=content,
         task_id=state["task_id"],
         workspace_id=state["workspace_id"],
+    )
+    msg["reasoning"] = (
+        "The Planner produced no actionable subtasks."
+        if attempts == 0 and not state.get("subtasks")
+        else f"Reviewer rejected the task {attempts} time(s): {state.get('review_feedback', 'No feedback provided.')}"
     )
     await _broadcast(state["workspace_id"], msg)
     return {
@@ -426,6 +530,7 @@ async def finalise_node(state: RecallState) -> dict:
         task_id=state["task_id"],
         workspace_id=state["workspace_id"],
     )
+    msg["reasoning"] = "Reviewer approved the completed subtask results; this is the final concise synthesis."
     logger.info("finalise | task=%s", state["task_id"])
     await _broadcast(state["workspace_id"], msg)
     return {

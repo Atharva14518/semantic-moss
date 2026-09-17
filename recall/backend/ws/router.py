@@ -74,7 +74,9 @@ async def websocket_endpoint(
                 # Broadcast human message to everyone in the room (including sender)
                 await manager.broadcast(workspace_id, {
                     "type": "human_message",
-                    "id": str(uuid.uuid4()),
+                    # Preserve a client-generated ID so the sender can merge
+                    # its optimistic row with this room broadcast.
+                    "id": msg.get("id") or str(uuid.uuid4()),
                     "workspace_id": workspace_id,
                     "client_id": client_id,
                     "display_name": msg.get("display_name", "Human"),

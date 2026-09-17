@@ -17,6 +17,7 @@ class RecallState(TypedDict):
     workspace_id: str
     task_id: str
     goal: str                          # The human's stated objective
+    request_type: str                  # "recall" | "task"; set before routing
 
     # ── Planner output ───────────────────────────────────────────
     subtasks: list[dict[str, Any]]     # [{id, description, status}]

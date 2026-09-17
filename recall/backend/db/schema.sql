@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
     moss_project_id TEXT,
     moss_project_key TEXT,
     moss_index_name TEXT,
-    allowed_domains TEXT[] DEFAULT ARRAY['wikipedia.org','github.com','docs.python.org'],
+    allowed_domains TEXT[] DEFAULT ARRAY['wikipedia.org','github.com','docs.python.org','nodejs.org'],
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

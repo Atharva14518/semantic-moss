@@ -11,8 +11,8 @@ from typing import Any
 from sqlalchemy import text
 
 from db.database import get_session_factory
+from realtime import publish_event
 from security.audit import write_audit
-from ws.manager import manager as ws_manager
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +28,9 @@ async def persist_message(
     content: str,
     task_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    message_id: str | None = None,
 ) -> str:
-    message_id = str(uuid.uuid4())
+    message_id = message_id or str(uuid.uuid4())
     async with get_session_factory()() as session:
         await session.execute(
             text("""
@@ -106,7 +107,7 @@ async def emit_domain_blocked(
         "timestamp": _now(),
     }
     try:
-        await ws_manager.broadcast(workspace_id, event)
+        await publish_event(workspace_id, event)
     except Exception as exc:  # noqa: BLE001
         logger.warning("flagged.broadcast_failed | %s", exc)
     return event

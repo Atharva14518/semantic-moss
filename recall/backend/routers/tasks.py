@@ -20,6 +20,7 @@ from sqlalchemy import text
 from agents.state import RecallState
 from db.database import get_session_factory
 from db.workspaces import ensure_workspace
+from realtime import publish_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/workspace", tags=["tasks"])
@@ -42,6 +43,7 @@ class TaskResponse(BaseModel):
     messages: list[dict[str, Any]] = []
     final_result: str | None = None
     error: str | None = None
+    human_message_id: str | None = None
 
 
 # ── Background runner ─────────────────────────────────────────────
@@ -63,6 +65,7 @@ async def _run_graph(
             "workspace_id": workspace_id,
             "task_id": task_id,
             "goal": goal,
+            "request_type": "task",
             "subtasks": [],
             "executor_results": [],
             "review_status": "",
@@ -139,6 +142,7 @@ async def create_task(
     thread_id = f"recall-{task_id}"
     graph = getattr(request.app.state, "graph", None)
 
+    human_message_id = str(uuid.uuid4())
     async with get_session_factory()() as session:
         await ensure_workspace(session, workspace_id)
         # Create task row
@@ -163,13 +167,23 @@ async def create_task(
                 )
             """),
             {
-                "mid": str(uuid.uuid4()),
+                "mid": human_message_id,
                 "wid": workspace_id,
                 "tid": task_id,
                 "content": body.goal,
             },
         )
         await session.commit()
+
+    await publish_event(workspace_id, {
+        "type": "human_message",
+        "id": human_message_id,
+        "workspace_id": workspace_id,
+        "task_id": task_id,
+        "role": "human",
+        "display_name": body.display_name,
+        "content": body.goal,
+    })
 
     # Start graph in background — returns immediately
     background_tasks.add_task(_run_graph, workspace_id, task_id, thread_id, body.goal, graph)
@@ -181,6 +195,7 @@ async def create_task(
         status="planning",
         goal=body.goal,
         langgraph_thread_id=thread_id,
+        human_message_id=human_message_id,
     )
 
 

@@ -1,12 +1,14 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import './index.css'
+"use client"
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8100'
-const WS_BASE = import.meta.env.VITE_WS_URL || 'ws://localhost:8100'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { Room, RoomEvent } from 'livekit-client'
+
+const API = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8100'
 
 // ── Utilities ─────────────────────────────────────────────────────
 
 const WORKSPACE_ID = (() => {
+  if (typeof window === 'undefined') return '00000000-0000-0000-0000-000000000000'
   const stored = localStorage.getItem('recall_ws_id')
   if (stored) return stored
   const id = '00000000-0000-0000-0000-' + Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12)
@@ -15,7 +17,9 @@ const WORKSPACE_ID = (() => {
 })()
 
 const CLIENT_ID = Math.random().toString(36).slice(2, 8)
-const DISPLAY_NAME = localStorage.getItem('recall_display_name') || 'You'
+const DISPLAY_NAME = typeof window === 'undefined'
+  ? 'You'
+  : localStorage.getItem('recall_display_name') || 'You'
 
 function fmtTime(iso) {
   if (!iso) return ''
@@ -80,6 +84,7 @@ function Sidebar({ participants, wsId, allowedDomains }) {
 }
 
 function MessageRow({ msg }) {
+  const [showReasoning, setShowReasoning] = useState(false)
   const isAgent = ['planner', 'executor', 'reviewer'].includes(msg.role)
   const isFlagged = msg.flagged || msg.type === 'flagged_event' || msg.event_type === 'domain_blocked'
   const isEscalated = !isFlagged && (msg.content?.includes('escalated') || msg.content?.includes('⚠'))
@@ -106,6 +111,14 @@ function MessageRow({ msg }) {
           <span className="message-time">{fmtTime(msg.timestamp || msg.created_at)}</span>
         </div>
         <div className={contentClass}>{msg.content}</div>
+        {isAgent && msg.reasoning && (
+          <>
+            <button className="why-btn" onClick={() => setShowReasoning(prev => !prev)}>
+              {showReasoning ? 'Hide why' : 'Why?'}
+            </button>
+            {showReasoning && <div className="message-reasoning">{msg.reasoning}</div>}
+          </>
+        )}
         {isFlagged && msg.hostname && (
           <div className="flagged-detail">blocked host {msg.hostname}</div>
         )}
@@ -265,6 +278,7 @@ const AGENTS = [
 ]
 
 export default function App() {
+  const [mounted, setMounted] = useState(false)
   const [messages, setMessages] = useState([])
   const [tasks, setTasks] = useState([])
   const [activeTaskId, setActiveTaskId] = useState(null)
@@ -274,9 +288,15 @@ export default function App() {
   const [clients, setClients] = useState(1)
   const [allowedDomains, setAllowedDomains] = useState([])
 
-  const wsRef = useRef(null)
+  const roomRef = useRef(null)
   const threadRef = useRef(null)
   const pollRef = useRef(null)
+  const seenMessageIdsRef = useRef(new Set())
+
+  // Do not render browser-only workspace identity during SSR. This keeps the
+  // server HTML identical to the first client render, then reads localStorage
+  // after hydration.
+  useEffect(() => setMounted(true), [])
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -285,54 +305,55 @@ export default function App() {
     }
   }, [messages])
 
-  // WebSocket connection
+  // LiveKit is the only realtime transport. Its reliable data channel carries
+  // versioned activity envelopes; stable event IDs make rendering idempotent.
   useEffect(() => {
-    const connect = () => {
-      const ws = new WebSocket(`${WS_BASE}/ws/${WORKSPACE_ID}?client_id=${CLIENT_ID}`)
-      wsRef.current = ws
-
-      ws.onopen = () => {
-        setConnected(true)
-        // keep-alive ping every 30s
-        const ping = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }))
-        }, 30000)
-        ws._pingInterval = ping
-      }
-
-      ws.onmessage = (e) => {
-        const data = JSON.parse(e.data)
-        if (data.type === 'pong') return
-        if (data.type === 'presence') {
-          setClients(data.clients)
-          return
-        }
-        if (data.type === 'flagged_event') {
-          setMessages(prev => {
-            if (prev.some(m => m.id === data.id || m.audit_id === data.audit_id)) return prev
-            return [...prev, { ...data, timestamp: data.created_at || new Date().toISOString() }]
-          })
-        }
-        if (data.type === 'agent_message') {
-          setMessages(prev => [...prev, { ...data, timestamp: data.created_at || new Date().toISOString() }])
-        }
-        if (data.type === 'human_message') {
-          setMessages(prev => [...prev, { ...data, role: 'human', timestamp: data.timestamp || new Date().toISOString() }])
-        }
-      }
-
-      ws.onclose = () => {
-        setConnected(false)
-        clearInterval(ws._pingInterval)
-        // Reconnect after 3s
-        setTimeout(connect, 3000)
-      }
-
-      ws.onerror = () => ws.close()
+    let disposed = false
+    const appendEvent = (data) => {
+        if (!['flagged_event', 'agent_message', 'human_message'].includes(data.type)) return
+        const messageId = data.id || data.audit_id
+        if (messageId && seenMessageIdsRef.current.has(messageId)) return
+        if (messageId) seenMessageIdsRef.current.add(messageId)
+        setMessages(prev => [...prev, {
+          ...data,
+          role: data.type === 'human_message' ? 'human' : data.role,
+          timestamp: data.timestamp || data.created_at || new Date().toISOString(),
+        }])
     }
-
+    const connect = async () => {
+      try {
+        const tokenResponse = await fetch(
+          `${API}/v1/workspace/${WORKSPACE_ID}/token?client_id=${CLIENT_ID}&display_name=${encodeURIComponent(DISPLAY_NAME)}`,
+        )
+        if (!tokenResponse.ok) throw new Error(await tokenResponse.text())
+        const credentials = await tokenResponse.json()
+        const room = new Room()
+        roomRef.current = room
+        room.on(RoomEvent.DataReceived, payload => {
+          try {
+            const envelope = JSON.parse(new TextDecoder().decode(payload))
+            appendEvent(envelope.payload)
+          } catch (_) {}
+        })
+        const updatePresence = () => setClients(room.remoteParticipants.size + 1)
+        room.on(RoomEvent.ParticipantConnected, updatePresence)
+        room.on(RoomEvent.ParticipantDisconnected, updatePresence)
+        room.on(RoomEvent.Disconnected, () => !disposed && setConnected(false))
+        await room.connect(credentials.url, credentials.token)
+        if (!disposed) {
+          setConnected(true)
+          updatePresence()
+        }
+      } catch (error) {
+        console.error('LiveKit connection failed', error)
+        if (!disposed) setConnected(false)
+      }
+    }
     connect()
-    return () => wsRef.current?.close()
+    return () => {
+      disposed = true
+      roomRef.current?.disconnect()
+    }
   }, [])
 
   // Poll active task for updates
@@ -382,6 +403,7 @@ export default function App() {
               created_at: a.created_at,
               timestamp: a.created_at,
             }))
+          flagged.forEach(message => seenMessageIdsRef.current.add(message.id || message.audit_id))
           setMessages(prev => (prev.length ? prev : flagged))
         }
       } catch (_) {}
@@ -393,21 +415,6 @@ export default function App() {
     if (!goal.trim() || sending) return
     setSending(true)
 
-    // Optimistically show human message in thread
-    const humanMsg = {
-      id: Math.random().toString(36).slice(2),
-      role: 'human',
-      display_name: DISPLAY_NAME,
-      content: goal,
-      timestamp: new Date().toISOString(),
-    }
-    setMessages(prev => [...prev, humanMsg])
-
-    // Broadcast to other WS clients
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'human_message', content: goal, display_name: DISPLAY_NAME }))
-    }
-
     try {
       const r = await fetch(`${API}/workspace/${WORKSPACE_ID}/task`, {
         method: 'POST',
@@ -415,6 +422,14 @@ export default function App() {
         body: JSON.stringify({ goal, display_name: DISPLAY_NAME }),
       })
       const task = await r.json()
+      if (task.human_message_id) {
+        seenMessageIdsRef.current.add(task.human_message_id)
+        setMessages(prev => [...prev, {
+          id: task.human_message_id,
+          role: 'human', display_name: DISPLAY_NAME, content: goal,
+          timestamp: new Date().toISOString(),
+        }])
+      }
       setTasks(prev => [task, ...prev])
       setActiveTaskId(task.task_id)
       setGoal('')
@@ -439,6 +454,8 @@ export default function App() {
     ...AGENTS,
     ...(clients > 1 ? [{ id: 'other', name: `+${clients - 1} more`, role: '', type: 'online' }] : []),
   ]
+
+  if (!mounted) return <div className="app-shell" />
 
   return (
     <div className="app-shell">

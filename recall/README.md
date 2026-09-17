@@ -28,7 +28,7 @@ cd frontend && npm install && npm run dev
 
 | Service | Local URL | Purpose |
 |---|---|---|
-| Frontend | http://localhost:5175 | React workspace |
+| Frontend | http://localhost:3000 | Next.js workspace |
 | Backend API | http://localhost:8100 | FastAPI + agents |
 | API Docs | http://localhost:8100/docs | Swagger UI |
 | Postgres | localhost:5432 | Source of truth |
@@ -40,9 +40,9 @@ cd frontend && npm install && npm run dev
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  Frontend (React + WebSockets)                           │
+│  Frontend (Next.js + LiveKit data channels)              │
 └───────────────────────┬──────────────────────────────────┘
-                        │ HTTP / WS
+                        │ HTTPS / LiveKit
 ┌───────────────────────▼──────────────────────────────────┐
 │  FastAPI Backend                                         │
 │  ┌─────────────────────────────────────────────────────┐ │
@@ -64,7 +64,7 @@ cd frontend && npm install && npm run dev
 - [x] **Phase 2** — Multiplayer UI: WebSockets, three-pane React workspace
 - [x] **Phase 3** — Security: domain allowlists, Moss authz, flagged events
 - [x] **Phase 4** — Cold storage + on-demand benchmark panel
-- [ ] **Phase 5** — Reliability: retries, backoff, test suite
+- [ ] **Phase 5** — Reliability: LiveKit reconnection/state rehydration, retries, backoff, full test suite
 - [ ] **Phase 6** — Deployment: Fly.io + Vercel
 - [ ] **Phase 7** — Polish: README, demo video, design review
 
@@ -104,6 +104,37 @@ curl -s "http://localhost:8100/workspace/${WORKSPACE_ID}/audit" | python3 -m jso
 ```
 
 A live UI tab on that workspace should show a flagged Executor event immediately.
+
+## Phase 5.5 - Data Rights, Explainability, and Operational Notes
+
+Workspace history has a default **30-day retention policy**. Automatic retention
+enforcement is a deployment-phase responsibility; the policy is defined now and
+the data-rights endpoint is available today. A workspace owner can erase all
+workspace-owned Postgres records and the corresponding known Moss document IDs:
+
+```bash
+curl -X DELETE "http://localhost:8100/workspace/${WORKSPACE_ID}/data"
+```
+
+Deletion is deliberately fail-closed: Moss document deletion runs before the
+Postgres transaction, so a Moss failure leaves durable rows intact and retryable.
+The shared index is never deleted. Agent activity records include a short,
+structured `reasoning` field (decision summary, not hidden chain-of-thought),
+which appears under the **Why?** control in the activity thread.
+Persisted activity metadata is intentionally limited to the event's role,
+workspace/task association, and concise decision summary; raw model prompts,
+tokens, and request bodies are not stored in the activity payload.
+
+### 12-factor alignment
+
+- **Config:** credentials and service URLs are read from environment variables;
+  no production secrets are committed to code.
+- **Backing services:** Postgres, Redis, Qdrant, Moss, and Groq are replaceable
+  attached resources configured externally.
+- **Stateless processes:** FastAPI does not retain required task state in memory;
+  LangGraph checkpoints and durable task data live in Postgres.
+- **Disposability:** the backend handles SIGTERM through container shutdown;
+  incomplete graph state remains checkpointed and can be resumed/retried.
 
 ## Non-Goals (v1)
 
