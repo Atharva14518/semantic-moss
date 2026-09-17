@@ -2,6 +2,7 @@
 db.py — Async SQLAlchemy engine + session factory.
 All database I/O uses asyncpg under the hood.
 """
+from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
@@ -45,7 +46,16 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
-async def get_db() -> AsyncSession:
+async def close_engine() -> None:
+    """Release database resources during graceful process shutdown."""
+    global _engine, _session_factory
+    if _engine is not None:
+        await _engine.dispose()
+    _engine = None
+    _session_factory = None
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency — yields a session and always commits/rolls back."""
     async with get_session_factory()() as session:
         try:

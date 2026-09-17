@@ -2,27 +2,29 @@
 
 Real-time multiplayer workspace for humans and AI agents (Planner, Executor, Reviewer). Powered by Moss for sub-10ms semantic retrieval, LangGraph for durable multi-agent orchestration, and Postgres for persisted task state.
 
-## Quick Start — Phase 0
+## Quick Start
 
 ```bash
-# 1. Clone and enter the project
-cd recall
+# 1. Clone and enter the application directory
+git clone https://github.com/Atharva14518/semantic-moss.git
+cd semantic-moss/recall
 
-# 2. Copy env and fill in your XAI_API_KEY
-cp .env .env.local   # already has Moss creds
+# 2. Create local configuration and fill in the required credentials
+cp .env.example .env
+# Set MOSS_PROJECT_ID, MOSS_PROJECT_KEY, GROQ_API_KEY,
+# LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET.
 
-# 3. Bring up the full stack
+# 3. Bring up the backend stack
 docker compose up -d --build
 
 # 4. Verify everything is healthy
 curl http://localhost:8100/health | python3 -m json.tool
 
-# 5. Run the Moss round-trip smoke test
-curl http://localhost:8100/moss/test | python3 -m json.tool
-
-# 6. Frontend (port 5175 — 5173 is often another Vite app)
+# 5. Start the Next.js frontend on http://localhost:3000
 cd frontend && npm install && npm run dev
 ```
+
+`GET /moss/test` performs a real Moss write/read round trip. Run it manually only when you intend to spend external API quota.
 
 ## Services
 
@@ -61,12 +63,13 @@ cd frontend && npm install && npm run dev
 
 - [x] **Phase 0** — Foundations: Docker stack, schema, /health, Moss round-trip
 - [x] **Phase 1** — Core orchestration: LangGraph state machine, Postgres checkpointing
-- [x] **Phase 2** — Multiplayer UI: WebSockets, three-pane React workspace
+- [x] **Phase 2** — Multiplayer UI: LiveKit data channels and three-pane Next.js workspace
 - [x] **Phase 3** — Security: domain allowlists, Moss authz, flagged events
 - [x] **Phase 4** — Cold storage + on-demand benchmark panel
-- [ ] **Phase 5** — Reliability: LiveKit reconnection/state rehydration, retries, backoff, full test suite
-- [ ] **Phase 6** — Deployment: Fly.io + Vercel
-- [ ] **Phase 7** — Polish: README, demo video, design review
+- [ ] **Phase 5** — Reliability: reconnect rehydration is complete; retries, backoff, and broader isolation testing remain
+- [x] **Phase 5.5** — Data erasure, durable decision explainability, and 12-factor operational review
+- [ ] **Phase 6** — Deployment: Fly.io/Railway + Vercel
+- [ ] **Phase 7** — Polish: OpenTelemetry, prompt/limit verification, demo video, and design review
 
 ## Moss isolation (honest)
 
@@ -88,7 +91,7 @@ A copy of a live (or quota-degraded) result is saved at `recall/docs/benchmark-b
 
 ## Phase 3 — Security
 
-Executor Playwright navigation is gated by a per-workspace domain allowlist. Blocked attempts are written to `audit_logs`, broadcast as `flagged_event` on the workspace WebSocket, and shown in the activity thread.
+Executor Playwright navigation is gated by a per-workspace domain allowlist. Blocked attempts are written to `audit_logs`, broadcast as `flagged_event` over LiveKit, and shown in the activity thread.
 
 Moss retrieval is **not** a separate Moss project per workspace. Documents carry `workspace_id` (and often a `{workspace_id}::{id}` prefix). The orchestrator strips foreign hits before they reach an agent.
 
@@ -109,21 +112,22 @@ A live UI tab on that workspace should show a flagged Executor event immediately
 
 Workspace history has a default **30-day retention policy**. Automatic retention
 enforcement is a deployment-phase responsibility; the policy is defined now and
-the data-rights endpoint is available today. A workspace owner can erase all
-workspace-owned Postgres records and the corresponding known Moss document IDs:
+the data-rights endpoint is available today. A caller with access to a workspace
+can erase its application rows, LangGraph checkpoints, Moss documents, and
+Qdrant vectors:
 
 ```bash
 curl -X DELETE "http://localhost:8100/workspace/${WORKSPACE_ID}/data"
 ```
 
-Deletion is deliberately fail-closed: Moss document deletion runs before the
-Postgres transaction, so a Moss failure leaves durable rows intact and retryable.
-The shared index is never deleted. Agent activity records include a short,
-structured `reasoning` field (decision summary, not hidden chain-of-thought),
-which appears under the **Why?** control in the activity thread.
-Persisted activity metadata is intentionally limited to the event's role,
-workspace/task association, and concise decision summary; raw model prompts,
-tokens, and request bodies are not stored in the activity payload.
+Deletion is deliberately fail-closed for durable Postgres state: Moss and Qdrant
+deletion run before the Postgres transaction, so a secondary-store failure leaves
+durable rows intact and retryable. The shared indexes are never deleted. Agent
+activity records include a short `reasoning` field (a decision summary, not hidden
+chain-of-thought), which appears under the **Why?** control in the activity thread.
+Persisted activity and reasoning are restored through the task API on initial load
+and after LiveKit reconnects. Raw model prompts, tokens, and request bodies are not
+stored in the activity payload.
 
 ### 12-factor alignment
 
@@ -133,8 +137,10 @@ tokens, and request bodies are not stored in the activity payload.
   attached resources configured externally.
 - **Stateless processes:** FastAPI does not retain required task state in memory;
   LangGraph checkpoints and durable task data live in Postgres.
-- **Disposability:** the backend handles SIGTERM through container shutdown;
-  incomplete graph state remains checkpointed and can be resumed/retried.
+- **Disposability:** Uvicorn receives a bounded graceful-shutdown window, the
+  LangGraph checkpointer exits through FastAPI lifespan handling, and the database
+  engine is explicitly disposed. Incomplete graph state remains checkpointed;
+  automatic restart recovery is still Phase 5 work.
 
 ## Non-Goals (v1)
 
