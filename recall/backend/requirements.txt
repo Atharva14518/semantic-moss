@@ -35,6 +35,14 @@ python-dotenv>=1.0.1
 # Logging
 structlog>=24.4.0
 
+# OpenTelemetry (optional — tracing is a no-op if these are absent)
+opentelemetry-api>=1.27.0
+opentelemetry-sdk>=1.27.0
+opentelemetry-exporter-otlp-proto-http>=1.27.0
+
+# Retry / reliability
+tenacity>=8.2.0
+
 # Testing
 pytest>=8.3.3
 pytest-asyncio>=0.24.0

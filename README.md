@@ -182,6 +182,18 @@ Being upfront about what's simplified for the hackathon build:
 - **Tenant isolation is logical, not physical.** All workspaces share a single Moss index, isolated via `workspace_id` metadata filtering plus an orchestrator-side authorization check — not separate per-tenant Moss projects. This is a deliberate trade-off driven by trial-tier budget/index limits, not an oversight.
 - **Retention policy is documented, not fully enforced.** A 30-day retention policy is defined for workspace history; automated purging isn't built yet — only the on-demand erasure endpoint is.
 - **Sync is batched, not event-driven.** Postgres → Moss indexing uses the batch sync path rather than change-data-capture; production scheduling remains deployment work.
+- **Interrupted-task recovery is passive.** LangGraph checkpoints survive restarts but there is no automatic re-queue on startup; a human must re-submit a task that was mid-flight when the process was killed.
+
+## Deployment
+
+| Target | Config file | Notes |
+|---|---|---|
+| Backend (Fly.io) | `recall/fly.toml` | `fly deploy` from `recall/`; set secrets via `fly secrets set` |
+| Frontend (Vercel) | `recall/frontend/vercel.json` | Set `NEXT_PUBLIC_API_URL` in Vercel dashboard to the Fly.io URL |
+
+Required secrets: `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY`, `GROQ_API_KEY`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DATABASE_URL`, `REDIS_URL`, `QDRANT_URL`.
+
+Optional (OpenTelemetry): `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_HEADERS`.
 
 ## License
 
