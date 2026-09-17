@@ -20,15 +20,25 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
+import groq
 from langchain_core.messages import HumanMessage, SystemMessage
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from agents.state import RecallState
 from agents.llm import get_llm
 from agents.tools import browse_url, extract_urls, infer_official_docs_url
+from config import get_settings
 from db.database import get_session_factory
 from db.workspaces import ensure_workspace
 from moss_client import get_workspace_moss_client
+from otel import get_tracer, llm_span
 from realtime import publish_event
 from security.flagged import persist_message
 from security.flagged import emit_domain_blocked
@@ -36,6 +46,61 @@ from security.flagged import emit_domain_blocked
 logger = logging.getLogger(__name__)
 
 MAX_REVIEW_ATTEMPTS = 3
+
+
+# ── LLM invocation with retry-with-backoff ────────────────────────
+
+def _is_retryable(exc: BaseException) -> bool:
+    """True for Groq 429s and any error mentioning rate-limiting."""
+    if isinstance(exc, groq.APIStatusError) and exc.status_code == 429:
+        return True
+    msg = str(exc).lower()
+    return "rate_limit" in msg or "too many" in msg
+
+
+async def _llm_invoke(llm, messages: list, node: str) -> Any:
+    """Invoke the LLM with exponential-backoff retry on rate-limit errors.
+
+    3 attempts, starting at 1 s, capped at 8 s.  Only rate-limit signals
+    trigger a retry; blocked-domain errors and JSON parse failures happen
+    after a successful invoke and are never seen here.
+
+    Each call is wrapped in an OTel span (no-op when OTel is not configured)
+    capturing node name, model, total latency, and token counts.
+    """
+    def _log_retry(retry_state) -> None:
+        logger.warning(
+            "llm.retry | node=%s attempt=%d error=%s",
+            node,
+            retry_state.attempt_number,
+            retry_state.outcome.exception(),
+        )
+
+    model = get_settings().groq_model
+    t0 = time.perf_counter()
+    response = None
+    with llm_span(get_tracer(), node, model) as span:
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=8),
+            retry=retry_if_exception(_is_retryable),
+            before_sleep=_log_retry,
+            reraise=True,
+        ):
+            with attempt:
+                response = await llm.ainvoke(messages)
+        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+        usage = getattr(response, "usage_metadata", {}) or {}
+        span.set_attribute("llm.latency_ms", latency_ms)
+        span.set_attribute("llm.input_tokens", usage.get("input_tokens", 0))
+        span.set_attribute("llm.output_tokens", usage.get("output_tokens", 0))
+        logger.info(
+            "llm.invoke | node=%s latency_ms=%.2f in=%d out=%d",
+            node, latency_ms,
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+        )
+    return response
 
 # Keep this deliberately narrow: requests to *summarise a subject* are tasks,
 # while requests to recall this workspace/session take the memory route.
@@ -165,10 +230,11 @@ async def recall_node(state: RecallState) -> dict:
         # answer rather than sending a context question through task review.
         logger.warning("recall.moss_context_failed | %s", exc)
 
-    response = await get_llm().ainvoke([
+    llm = get_llm()
+    response = await _llm_invoke(llm, [
         SystemMessage(content=RECALL_SYSTEM),
         HumanMessage(content=f"Question: {state['goal']}\n\nWorkspace memory:\n{context}"),
-    ])
+    ], "recall")
     answer = response.content.strip()
     msg = _msg(
         role="system", content=f"✓ Context recalled.\n{answer}",
@@ -192,10 +258,10 @@ async def planner_node(state: RecallState) -> dict:
     if moss_context:
         human = f"{human}\n\n{moss_context}"
 
-    response = await llm.ainvoke([
+    response = await _llm_invoke(llm, [
         SystemMessage(content=PLANNER_SYSTEM),
         HumanMessage(content=human),
-    ])
+    ], "planner")
 
     # Parse subtasks — robust to markdown code fences
     raw = response.content.strip()
@@ -210,6 +276,16 @@ async def planner_node(state: RecallState) -> dict:
     except json.JSONDecodeError:
         logger.warning("planner | JSON parse failed, using fallback subtask")
         subtasks = [{"id": "1", "description": state["goal"], "status": "pending"}]
+
+    if not isinstance(subtasks, list):
+        logger.warning(
+            "planner | parse returned non-list type=%s, using fallback subtask",
+            type(subtasks).__name__,
+        )
+        subtasks = [{"id": "1", "description": state["goal"], "status": "pending"}]
+    elif len(subtasks) > 5:
+        logger.warning("planner | subtask cap: truncating %d subtasks to 5", len(subtasks))
+        subtasks = subtasks[:5]
 
     msg = _msg(
         role="planner",
@@ -340,10 +416,10 @@ async def executor_node(state: RecallState) -> dict:
         system = EXECUTOR_LLM_ONLY_SYSTEM
         notes_fallback = "LLM only"
 
-    response = await llm.ainvoke([
+    response = await _llm_invoke(llm, [
         SystemMessage(content=system),
         HumanMessage(content=human_content),
-    ])
+    ], "executor")
 
     raw = response.content.strip()
     if raw.startswith("```"):
@@ -433,7 +509,7 @@ async def reviewer_node(state: RecallState) -> dict:
     all_pending = [s for s in state["subtasks"] if s.get("status") == "pending"]
     all_completed = [s for s in state["subtasks"] if s.get("status") != "pending"]
 
-    response = await llm.ainvoke([
+    response = await _llm_invoke(llm, [
         SystemMessage(content=REVIEWER_SYSTEM),
         HumanMessage(content=(
             f"Original goal: {state['goal']}\n\n"
@@ -441,7 +517,7 @@ async def reviewer_node(state: RecallState) -> dict:
             f"Results: {json.dumps(state.get('executor_results', []))}\n\n"
             f"Remaining pending: {len(all_pending)}"
         )),
-    ])
+    ], "reviewer")
 
     raw = response.content.strip()
     if raw.startswith("```"):
@@ -516,13 +592,13 @@ async def escalate_node(state: RecallState) -> dict:
 async def finalise_node(state: RecallState) -> dict:
     """Synthesise a final summary once the reviewer approves."""
     llm = get_llm()
-    response = await llm.ainvoke([
+    response = await _llm_invoke(llm, [
         SystemMessage(content="Summarise the completed work in 2-3 sentences for the user."),
         HumanMessage(content=(
             f"Goal: {state['goal']}\n"
             f"Results: {json.dumps(state.get('executor_results', []))}"
         )),
-    ])
+    ], "finalise")
     summary = response.content.strip()
     msg = _msg(
         role="system",

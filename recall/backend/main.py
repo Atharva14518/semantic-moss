@@ -31,6 +31,7 @@ from routers import security as security_router
 from routers import benchmark as benchmark_router
 from routers import realtime as realtime_router
 from agents.graph import checkpointer_context, compile_graph
+from otel import setup_tracing
 
 # ── Structured logging setup ─────────────────────────────────────
 structlog.configure(
@@ -61,6 +62,11 @@ _service_status: dict = {}
 async def lifespan(app: FastAPI):
     """Run startup checks; keep references alive for the app lifetime."""
     log.info("recall.startup | environment=%s", cfg.environment)
+
+    try:
+        setup_tracing()
+    except Exception as _otel_exc:
+        log.warning("recall.startup | OTel setup failed (continuing): %s", _otel_exc)
 
     try:
         await apply_schema_patches()

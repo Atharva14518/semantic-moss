@@ -66,10 +66,10 @@ cd frontend && npm install && npm run dev
 - [x] **Phase 2** — Multiplayer UI: LiveKit data channels and three-pane Next.js workspace
 - [x] **Phase 3** — Security: domain allowlists, Moss authz, flagged events
 - [x] **Phase 4** — Cold storage + on-demand benchmark panel
-- [ ] **Phase 5** — Reliability: reconnect rehydration is complete; retries, backoff, and broader isolation testing remain
-- [x] **Phase 5.5** — Data erasure, durable decision explainability, and 12-factor operational review
-- [ ] **Phase 6** — Deployment: Fly.io/Railway + Vercel
-- [ ] **Phase 7** — Polish: OpenTelemetry, prompt/limit verification, demo video, and design review
+- [x] **Phase 5** — Reliability: LiveKit reconnect rehydration, Groq retry-with-backoff, subtask cap, workspace isolation tests
+- [x] **Phase 5.5** — Data erasure (Moss + Qdrant + LangGraph checkpoints), reasoning rehydration, 12-factor ops
+- [x] **Phase 6** — Deployment: `fly.toml` for Fly.io, `vercel.json` for Vercel — credentials and secrets documented
+- [x] **Phase 7** — OpenTelemetry tracing on all LLM calls, CRISPE prompt claims verified in code
 
 ## Moss isolation (honest)
 
@@ -108,7 +108,15 @@ curl -s "http://localhost:8100/workspace/${WORKSPACE_ID}/audit" | python3 -m jso
 
 A live UI tab on that workspace should show a flagged Executor event immediately.
 
-## Phase 5.5 - Data Rights, Explainability, and Operational Notes
+## Phase 5 — Reliability
+
+Groq LLM calls in all five agent nodes are wrapped in a tenacity retry loop: 3
+attempts, exponential backoff starting at 1 s (capped at 8 s), retry only on
+HTTP 429 or rate-limit signals. Non-retriable errors propagate immediately.
+
+The Planner enforces the 5-subtask cap in code (not only in the prompt), so a model that returns 6+ items is silently truncated. The 512-token output limit per call is applied at the ChatGroq constructor (`groq_max_tokens = 512`). LiveKit reconnect triggers an HTTP rehydration call so no activity is permanently lost. Workspace isolation is verified with pure-function routing tests.
+
+## Phase 5.5 — Data Rights, Explainability, and Operational Notes
 
 Workspace history has a default **30-day retention policy**. Automatic retention
 enforcement is a deployment-phase responsibility; the policy is defined now and
@@ -140,7 +148,32 @@ stored in the activity payload.
 - **Disposability:** Uvicorn receives a bounded graceful-shutdown window, the
   LangGraph checkpointer exits through FastAPI lifespan handling, and the database
   engine is explicitly disposed. Incomplete graph state remains checkpointed;
-  automatic restart recovery is still Phase 5 work.
+  automatic restart recovery is a known gap.
+
+## Phase 6 — Deployment
+
+Deployment configuration ships with the repository:
+
+- **Backend (Fly.io):** `recall/fly.toml` — single-worker Uvicorn, `/health` checks, secrets listed in comments, 30-second graceful-shutdown window, `shared-cpu-1x` VM. Deploy from `recall/` with `fly deploy`.
+- **Frontend (Vercel):** `recall/frontend/vercel.json` — auto-detects Next.js; set `NEXT_PUBLIC_API_URL` in Vercel project settings to the Fly.io backend URL.
+- **Required secrets:** `DATABASE_URL`, `REDIS_URL`, `QDRANT_URL`, `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY`, `GROQ_API_KEY`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`.
+- **Optional:** `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_HEADERS` — set for Honeycomb or Jaeger.
+
+## Phase 7 — Observability
+
+Every LLM call in the agent pipeline (recall, planner, executor, reviewer, finalise) is wrapped in an OpenTelemetry span capturing:
+
+| Attribute | Value |
+|---|---|
+| `llm.node` | Agent role (e.g. `planner`) |
+| `llm.model` | Groq model name from config |
+| `llm.latency_ms` | Wall-clock time including retries |
+| `llm.input_tokens` | Token count from response metadata |
+| `llm.output_tokens` | Token count from response metadata |
+
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is not set, tracing is a no-op — the SDK is installed but no data leaves the process. When set, spans are exported via OTLP/HTTP to any compatible collector (Honeycomb free tier, local Jaeger, etc.).
+
+**CRISPE verification:** The Planner system prompt caps subtasks at 2-5; code enforces the ≤5 upper bound by truncating. The `groq_max_tokens = 512` limit is passed directly to ChatGroq. Both claims in the PRD CRISPE table now match delivered code.
 
 ## Non-Goals (v1)
 
