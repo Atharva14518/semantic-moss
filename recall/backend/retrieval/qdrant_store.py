@@ -40,7 +40,12 @@ def get_qdrant() -> QdrantClient:
     global _client
     if _client is None:
         cfg = get_settings()
-        _client = QdrantClient(url=cfg.qdrant_url, timeout=10)
+        _client = QdrantClient(
+            url=cfg.qdrant_url,
+            api_key=cfg.qdrant_api_key or None,
+            timeout=10,
+            check_compatibility=False,
+        )
     return _client
 
 

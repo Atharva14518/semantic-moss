@@ -159,8 +159,11 @@ async def _check_redis() -> dict:
 async def _check_qdrant() -> dict:
     try:
         t0 = time.perf_counter()
+        headers = {}
+        if cfg.qdrant_api_key:
+            headers["api-key"] = cfg.qdrant_api_key
         async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{cfg.qdrant_url}/healthz")
+            resp = await client.get(f"{cfg.qdrant_url}/healthz", headers=headers)
             resp.raise_for_status()
         return {"ok": True, "latency_ms": round((time.perf_counter() - t0) * 1000, 2)}
     except Exception as e:

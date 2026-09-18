@@ -10,9 +10,26 @@ from sqlalchemy.pool import NullPool
 from config import get_settings
 
 
+import urllib.parse
+
+
 def _async_db_url(url: str) -> str:
-    """Convert postgresql:// → postgresql+asyncpg://"""
-    return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    """Convert postgresql:// → postgresql+asyncpg:// and adapt query params for asyncpg."""
+    u = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    parsed = urllib.parse.urlsplit(u)
+    if not parsed.query:
+        return u
+    # asyncpg does not accept 'sslmode', it requires 'ssl' instead
+    query_params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    new_params = []
+    for k, v in query_params:
+        if k == "sslmode":
+            if v != "disable":
+                new_params.append(("ssl", "require"))
+        else:
+            new_params.append((k, v))
+    new_query = urllib.parse.urlencode(new_params)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
 
 
 def build_engine():
