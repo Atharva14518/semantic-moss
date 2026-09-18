@@ -102,14 +102,19 @@ async def _llm_invoke(llm, messages: list, node: str) -> Any:
         )
     return response
 
-# Keep this deliberately narrow: requests to *summarise a subject* are tasks,
-# while requests to recall this workspace/session take the memory route.
+# Keep this flexible: questions asking what was discussed, chat recap, or session summary take the recall route.
 _RECALL_REQUEST = re.compile(
-    r"\b(?:what (?:did|have) we (?:discuss|talk(?:ed)? about)|"
-    r"(?:show|give|tell me|provide) (?:the )?(?:chat |session |workspace )?"
-    r"(?:context|recap|summary)|"
-    r"(?:context|recap|summary) (?:of|for) (?:this|the) (?:chat|session|workspace)|"
-    r"what happened so far|bring me up to speed)\b",
+    r"\b("
+    r"what\s+(?:did\s+we\s+|have\s+we\s+|we\s+)?(?:discuss(?:ed)?|talk(?:ed)?\s+about)"
+    r"|(?:what\s+(?:things\s+)?(?:were\s+|did\s+we\s+|we\s+)?discussed)"
+    r"|(?:in\s+this\s+(?:chat|session|conversation|workspace)\s+what\s+.*(?:discuss|talk))"
+    r"|(?:show|give|tell\s+me|provide|what\s+is)\s+(?:the\s+)?(?:chat\s+|session\s+|workspace\s+|conversation\s+)?"
+    r"(?:context|recap|summary|history)"
+    r"|(?:context|recap|summary|history)\s+(?:of|for)\s+(?:this|the)\s+(?:chat|session|workspace|conversation)"
+    r"|what\s+happened\s+so\s+far|bring\s+me\s+up\s+to\s+speed"
+    r"|what\s+was\s+(?:discussed|said|mentioned)"
+    r"|earlier\s+discussion"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -224,6 +229,25 @@ async def recall_node(state: RecallState) -> dict:
         )
         if hits:
             context = "\n".join(f"- {hit.get('text', '')[:1000]}" for hit in hits)
+        else:
+            # Fallback to durable Postgres messages in this workspace
+            try:
+                from sqlalchemy import text
+                async with get_session_factory()() as session:
+                    res = await session.execute(
+                        text("""
+                            SELECT role, content FROM messages
+                            WHERE workspace_id = CAST(:wid AS uuid)
+                            AND role IN ('human', 'executor', 'system')
+                            ORDER BY created_at DESC LIMIT 20
+                        """),
+                        {"wid": state["workspace_id"]},
+                    )
+                    rows = res.fetchall()
+                    if rows:
+                        context = "\n".join(f"- {r.role}: {r.content[:500]}" for r in reversed(rows))
+            except Exception as e:
+                logger.warning("recall.postgres_fallback_failed | %s", e)
         logger.info("recall | moss_hits=%d latency_ms=%.1f", len(hits), latency_ms)
     except Exception as exc:  # noqa: BLE001
         # A retrieval outage should still result in a completed, transparent
