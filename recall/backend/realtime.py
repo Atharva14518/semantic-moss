@@ -65,5 +65,12 @@ async def publish_event(workspace_id: str, event: dict[str, Any]) -> None:
                 kind=models.DataPacket.RELIABLE,
             )
         )
+    except Exception as exc:
+        logger.warning(
+            "livekit.publish_failed | room=%s event=%s error=%s",
+            room_name(workspace_id),
+            event.get("id"),
+            exc,
+        )
     finally:
         await lk.aclose()

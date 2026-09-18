@@ -52,6 +52,11 @@ class MossIndexClient:
                 await self._client.load_index(self._index_name, auto_refresh=True)
                 logger.info("moss.ensure_ready | existing index loaded")
                 self._ready = True
+                # Warm up embedding model so first benchmark query is not penalized by cold load
+                try:
+                    await self._client.query(self._index_name, "warmup", QueryOptions(top_k=1))
+                except Exception:
+                    pass
                 return
             except Exception as exc:
                 if is_quota_error(exc):

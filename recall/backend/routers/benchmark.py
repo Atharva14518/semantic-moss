@@ -97,10 +97,9 @@ async def run_benchmark():
 async def _parallel(moss):
     import asyncio
 
-    return await asyncio.gather(
-        moss.query(BENCHMARK_QUERY, top_k=3, reason="manual_benchmark"),
-        asyncio.to_thread(qdrant_store.query, BENCHMARK_QUERY, 3, None),
-    )
+    moss_res = await moss.query(BENCHMARK_QUERY, top_k=3, reason="manual_benchmark")
+    qdrant_res = await asyncio.to_thread(qdrant_store.query, BENCHMARK_QUERY, 3, None)
+    return moss_res, qdrant_res
 
 
 @router.get("/benchmark/cache")
