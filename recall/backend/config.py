@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     # Qdrant
     qdrant_url: str = "http://qdrant:6333"
+    qdrant_api_key: str = ""
     qdrant_collection: str = "recall-cold"
 
     # Security
