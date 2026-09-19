@@ -46,8 +46,11 @@ def _seed_qdrant_once() -> None:
     global _qdrant_seeded
     if _qdrant_seeded:
         return
-    qdrant_store.upsert_docs(BENCHMARK_DOCS)
-    _qdrant_seeded = True
+    try:
+        qdrant_store.upsert_docs(BENCHMARK_DOCS)
+        _qdrant_seeded = True
+    except Exception as exc:
+        logger.warning("benchmark.qdrant_seed_failed | %s", exc)
 
 
 @router.post("/benchmark", response_model=BenchmarkResponse)
@@ -67,7 +70,18 @@ async def run_benchmark():
     _seed_qdrant_once()
 
     moss = get_moss_client()
-    (moss_docs, moss_ms), (qdrant_docs, qdrant_ms) = await _parallel(moss)
+
+    try:
+        (moss_docs, moss_ms), (qdrant_docs, qdrant_ms) = await _parallel(moss)
+    except Exception as exc:
+        logger.warning("benchmark.parallel_failed | %s", exc)
+        # Fall back: try Moss alone, report Qdrant as unavailable
+        try:
+            moss_docs, moss_ms = await moss.query(BENCHMARK_QUERY, top_k=3, reason="manual_benchmark")
+        except Exception as moss_exc:
+            logger.warning("benchmark.moss_also_failed | %s", moss_exc)
+            moss_docs, moss_ms = [], 0.0
+        qdrant_docs, qdrant_ms = [], -1.0
 
     moss_error = "quota_exhausted" if moss.quota_exhausted else None
     moss_value = None if moss_error else round(moss_ms, 2)
