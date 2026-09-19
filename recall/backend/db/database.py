@@ -13,21 +13,40 @@ from config import get_settings
 import urllib.parse
 
 
+_ASYNCPG_ALLOWED_PARAMS = {
+    "ssl",
+    "timeout",
+    "command_timeout",
+    "statement_cache_size",
+    "max_cached_statement_lifetime",
+    "max_cacheable_statement_size",
+    "server_settings",
+}
+
+
 def _async_db_url(url: str) -> str:
-    """Convert postgresql:// → postgresql+asyncpg:// and adapt query params for asyncpg."""
+    """Convert postgresql:// → postgresql+asyncpg:// and strip unsupported libpq parameters."""
     u = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     parsed = urllib.parse.urlsplit(u)
     if not parsed.query:
         return u
-    # asyncpg does not accept 'sslmode', it requires 'ssl' instead
+    # asyncpg only accepts specific parameters; strip libpq params like channel_binding, gssencmode
     query_params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     new_params = []
+    has_ssl = False
     for k, v in query_params:
         if k == "sslmode":
             if v != "disable":
-                new_params.append(("ssl", "require"))
-        else:
+                has_ssl = True
+        elif k == "ssl":
+            has_ssl = True
             new_params.append((k, v))
+        elif k in _ASYNCPG_ALLOWED_PARAMS:
+            new_params.append((k, v))
+
+    if has_ssl and not any(k == "ssl" for k, _ in new_params):
+        new_params.append(("ssl", "require"))
+
     new_query = urllib.parse.urlencode(new_params)
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
 

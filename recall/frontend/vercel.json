@@ -1,7 +1,4 @@
 {
   "buildCommand": "npm run build",
-  "installCommand": "npm install",
-  "env": {
-    "NEXT_PUBLIC_API_URL": "https://recall-backend.fly.dev"
-  }
+  "installCommand": "npm install"
 }
