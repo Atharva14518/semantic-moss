@@ -15,10 +15,11 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
+import re
 import redis.asyncio as aioredis
 import structlog
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
@@ -125,6 +126,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def normalize_path_middleware(request: Request, call_next):
+    if "//" in request.scope.get("path", ""):
+        request.scope["path"] = re.sub(r"/+", "/", request.scope["path"])
+    return await call_next(request)
 
 # ── Routers ───────────────────────────────────────────────────────
 app.include_router(tasks_router.router)

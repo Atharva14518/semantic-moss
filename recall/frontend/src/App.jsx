@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Room, RoomEvent } from 'livekit-client'
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'https://recall-backend-z55e.onrender.com'
+const API = (process.env.NEXT_PUBLIC_API_URL || 'https://recall-backend-z55e.onrender.com').replace(/\/+$/, '')
 
 // ── Utilities ─────────────────────────────────────────────────────
 
