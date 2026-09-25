@@ -109,21 +109,38 @@ def build_graph() -> StateGraph:
     return g
 
 
-def compile_graph(checkpointer: AsyncPostgresSaver):
-    """Compile the graph with a live Postgres checkpointer."""
+from contextlib import asynccontextmanager
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
+
+
+def compile_graph(checkpointer: AsyncPostgresSaver | None = None):
+    """Compile the graph with a live Postgres checkpointer or in-memory fallback."""
     g = build_graph()
-    return g.compile(checkpointer=checkpointer)
+    if checkpointer is not None:
+        return g.compile(checkpointer=checkpointer)
+    return g.compile()
 
 
-def checkpointer_context(db_url: str | None = None):
+@asynccontextmanager
+async def checkpointer_context(db_url: str | None = None):
     """
-    Returns the async context manager for AsyncPostgresSaver.
-    Use as:
-        async with checkpointer_context() as checkpointer:
-            await checkpointer.setup()
-            app.state.checkpointer = checkpointer
-            yield  # hold open for app lifetime
+    Returns an async context manager for AsyncPostgresSaver backed by an
+    AsyncConnectionPool. This automatically re-establishes dropped/idle connections
+    on cloud Postgres (e.g. Render/Neon/Supabase).
     """
     cfg = get_settings()
     url = db_url or cfg.database_url
-    return AsyncPostgresSaver.from_conn_string(url)
+    if "postgresql+asyncpg://" in url:
+        url = url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+    async with AsyncConnectionPool(
+        conninfo=url,
+        min_size=1,
+        max_size=10,
+        max_idle=30,
+        check=AsyncConnectionPool.check_connection,
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+    ) as pool:
+        yield AsyncPostgresSaver(conn=pool)
+

@@ -97,7 +97,17 @@ async def _run_graph(
         config = {"configurable": {"thread_id": thread_id}}
 
         logger.info("graph.run | task=%s thread=%s", task_id, thread_id)
-        final_state = await graph.ainvoke(initial_state, config=config)
+        try:
+            final_state = await graph.ainvoke(initial_state, config=config)
+        except Exception as inv_err:
+            err_msg = str(inv_err).lower()
+            if "connection is closed" in err_msg or "interfaceerror" in err_msg or "operationalerror" in err_msg:
+                logger.warning("graph.checkpointer_closed | falling back to in-memory graph execution: %s", inv_err)
+                from agents.graph import compile_graph
+                fallback_graph = compile_graph(None)
+                final_state = await fallback_graph.ainvoke(initial_state)
+            else:
+                raise
 
         # Persist final state to our tasks table
         status = "completed"
