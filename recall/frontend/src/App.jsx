@@ -94,6 +94,12 @@ function PresenceDot({ type }) {
 }
 
 function Sidebar({ participants, wsId, allowedDomains }) {
+  const handleNewWorkspace = () => {
+    const newId = '00000000-0000-0000-0000-' + Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12)
+    localStorage.setItem('recall_ws_id', newId)
+    window.location.href = `${window.location.pathname}?workspace=${newId}`
+  }
+
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
@@ -103,6 +109,14 @@ function Sidebar({ participants, wsId, allowedDomains }) {
         </div>
         <div className="sidebar-ws-name">Workspace</div>
         <div className="ws-id-pill" title={wsId}>{wsId.slice(-8)}</div>
+        <button 
+          onClick={handleNewWorkspace} 
+          style={{ marginTop: '12px', width: '100%', background: 'transparent', color: 'var(--text-secondary)', border: '1px solid var(--border)', padding: '6px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: '600' }}
+          onMouseOver={(e) => { e.target.style.color = 'var(--text-primary)'; e.target.style.borderColor = 'rgba(217,119,6,0.25)'; }}
+          onMouseOut={(e) => { e.target.style.color = 'var(--text-secondary)'; e.target.style.borderColor = 'var(--border)'; }}
+        >
+          + New Workspace
+        </button>
       </div>
       {allowedDomains?.length > 0 && (
         <>
