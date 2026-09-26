@@ -1,10 +1,10 @@
 # Recall — a shared workspace where humans and AI agents collaborate on long-running tasks.
 
+Real-time multiplayer workspace for humans and AI agents (Planner, Executor, Reviewer). Powered by Moss for sub-10ms semantic retrieval, LangGraph for durable multi-agent orchestration, and Postgres for persisted task state.
+
 **🔴 Live demo: [https://semantic-moss.vercel.app/](https://semantic-moss.vercel.app/)**
 
 > Popular AI agents today are single-player. ChatGPT gives one person one private conversation — if two teammates both need help on the same task, they open two separate chats that can't see each other, and nothing carries over to the next session. Even multi-agent tools like AutoGPT or CrewAI are built around one person watching a single run, not a shared, persistent workspace. Recall closes that gap: a shared workspace where humans and agents work on the same task, in real time, with a memory that doesn't reset.
-
-Real-time multiplayer workspace for humans and AI agents (Planner, Executor, Reviewer). Powered by Moss for sub-10ms semantic retrieval, LangGraph for durable multi-agent orchestration, and Postgres for persisted task state.
 
 ## Quick Start
 
