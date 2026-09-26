@@ -10,6 +10,10 @@ Built for the **Multiplayer AI and Collaborative Agents** hackathon track.
 
 Recall gives humans and a team of specialized AI agents — **Planner**, **Executor**, and **Reviewer** — a shared workspace instead of a disconnected chat window. Every message, decision, and task artifact is indexed into a fast semantic memory layer ([Moss](https://moss.dev)), so any participant — human or agent — can recall relevant history instantly instead of re-reading a growing transcript. Real-time sync is powered by [LiveKit](https://livekit.io), so every connected participant sees the same state live, with no polling.
 
+**🔴 Live demo: [https://semantic-moss.vercel.app/](https://semantic-moss.vercel.app/)**
+
+> Popular AI agents today are single-player. ChatGPT gives one person one private conversation — if two teammates both need help on the same task, they open two separate chats that can't see each other, and nothing carries over to the next session. Even multi-agent tools like AutoGPT or CrewAI are built around one person watching a single run, not a shared, persistent workspace. Recall closes that gap: a shared workspace where humans and agents work on the same task, in real time, with a memory that doesn't reset.
+
 ## Key Features
 
 - **Multiplayer, real-time collaboration** — LiveKit-backed presence and activity sync; every event is delivered exactly once per client via stable `event_id` deduplication.
