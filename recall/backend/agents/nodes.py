@@ -104,7 +104,8 @@ async def _llm_invoke(llm, messages: list, node: str) -> Any:
 
 # Keep this flexible: questions asking what was discussed, chat recap, or session summary take the recall route.
 _RECALL_REQUEST = re.compile(
-    r"\b("
+    r"^(?:what\s+(?:is|are|was|were)|who\s+(?:is|was)|define\b|explain\b)"
+    r"|\b("
     r"what\s+(?:did\s+we\s+|have\s+we\s+|we\s+)?(?:discuss(?:ed)?|talk(?:ed)?\s+about)"
     r"|(?:what\s+(?:things\s+)?(?:were\s+|did\s+we\s+|we\s+)?discussed)"
     r"|(?:in\s+this\s+(?:chat|session|conversation|workspace)\s+what\s+.*(?:discuss|talk))"
@@ -209,10 +210,10 @@ async def classify_request_node(state: RecallState) -> dict:
     return {"request_type": request_type}
 
 
-RECALL_SYSTEM = """You answer questions about the current Recall workspace.
-Use only the retrieved workspace memory below. Give a direct, concise answer.
-If the memory does not contain enough information, say that clearly; do not
-invent events or claims."""
+RECALL_SYSTEM = """You answer questions directly and concisely.
+If the question is about the workspace or past events, use ONLY the retrieved workspace memory below.
+If the question is about general knowledge (e.g., definitions, facts, algorithms), answer directly using your own knowledge.
+Do not invent workspace events or claims."""
 
 
 async def recall_node(state: RecallState) -> dict:
