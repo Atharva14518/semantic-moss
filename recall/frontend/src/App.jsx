@@ -9,10 +9,17 @@ const API = (process.env.NEXT_PUBLIC_API_URL || 'https://recall-backend-z55e.onr
 
 const WORKSPACE_ID = (() => {
   if (typeof window === 'undefined') return '00000000-0000-0000-0000-000000000000'
-  const stored = localStorage.getItem('recall_ws_id')
-  if (stored) return stored
-  const id = '00000000-0000-0000-0000-' + Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12)
+  const params = new URLSearchParams(window.location.search)
+  let id = params.get('workspace')
+  if (!id) {
+    id = localStorage.getItem('recall_ws_id') ||
+      ('00000000-0000-0000-0000-' + Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12))
+  }
   localStorage.setItem('recall_ws_id', id)
+  if (params.get('workspace') !== id) {
+    params.set('workspace', id)
+    window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`)
+  }
   return id
 })()
 
@@ -292,7 +299,9 @@ function BenchmarkPanel() {
           </div>
           <div className="bench-row">
             <span>Qdrant</span>
-            <span className="bench-qdrant">{Number(result.qdrant_ms).toFixed(1)} ms</span>
+            <span className="bench-qdrant">
+              {Number(result.qdrant_ms) < 0 ? 'n/a' : `${Number(result.qdrant_ms).toFixed(1)} ms`}
+            </span>
           </div>
           <div className="bench-note">
             {result.moss_error
