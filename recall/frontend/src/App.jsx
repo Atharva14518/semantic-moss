@@ -2,26 +2,11 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Room, RoomEvent } from 'livekit-client'
+import { useSearchParams, useRouter, usePathname } from 'next/navigation'
 
 const API = (process.env.NEXT_PUBLIC_API_URL || 'https://recall-backend-z55e.onrender.com').replace(/\/+$/, '')
 
 // ── Utilities ─────────────────────────────────────────────────────
-
-const WORKSPACE_ID = (() => {
-  if (typeof window === 'undefined') return '00000000-0000-0000-0000-000000000000'
-  const params = new URLSearchParams(window.location.search)
-  let id = params.get('workspace')
-  if (!id) {
-    id = localStorage.getItem('recall_ws_id') ||
-      ('00000000-0000-0000-0000-' + Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12))
-  }
-  localStorage.setItem('recall_ws_id', id)
-  if (params.get('workspace') !== id) {
-    params.set('workspace', id)
-    window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`)
-  }
-  return id
-})()
 
 const CLIENT_ID = Math.random().toString(36).slice(2, 8)
 const DISPLAY_NAME = typeof window === 'undefined'
@@ -93,13 +78,7 @@ function PresenceDot({ type }) {
   return <span className={`presence-dot ${type}`} />
 }
 
-function Sidebar({ participants, wsId, allowedDomains }) {
-  const handleNewWorkspace = () => {
-    const newId = '00000000-0000-0000-0000-' + Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12)
-    localStorage.setItem('recall_ws_id', newId)
-    window.location.href = `${window.location.pathname}?workspace=${newId}`
-  }
-
+function Sidebar({ participants, wsId, allowedDomains, onNewWorkspace }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
@@ -108,9 +87,9 @@ function Sidebar({ participants, wsId, allowedDomains }) {
           Recall
         </div>
         <div className="sidebar-ws-name">Workspace</div>
-        <div className="ws-id-pill" title={wsId}>{wsId.slice(-8)}</div>
+        <div className="ws-id-pill" title={wsId}>{wsId ? wsId.slice(-8) : ''}</div>
         <button 
-          onClick={handleNewWorkspace} 
+          onClick={onNewWorkspace} 
           style={{ marginTop: '12px', width: '100%', background: 'transparent', color: 'var(--text-secondary)', border: '1px solid var(--border)', padding: '6px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: '600' }}
           onMouseOver={(e) => { e.target.style.color = 'var(--text-primary)'; e.target.style.borderColor = 'rgba(217,119,6,0.25)'; }}
           onMouseOut={(e) => { e.target.style.color = 'var(--text-secondary)'; e.target.style.borderColor = 'var(--border)'; }}
@@ -243,7 +222,6 @@ function BenchmarkPanel() {
   const [error, setError] = useState('')
   const [now, setNow] = useState(Date.now())
 
-  // Restore last run from this tab. Do not hit Moss on mount.
   useEffect(() => {
     try {
       const raw = sessionStorage.getItem('recall_bench_cache')
@@ -275,8 +253,6 @@ function BenchmarkPanel() {
   const cacheFresh = ageS != null && ageS < (result?.cache_ttl_s || 180)
 
   const run = async () => {
-    // Guard: never auto-retry. One click → at most one network call; server cache
-    // blocks a live Moss query if another tab just ran the same endpoint.
     if (running) return
     if (cacheFresh) {
       setResult(prev => prev ? { ...prev, cached: true } : prev)
@@ -341,6 +317,8 @@ const AGENTS = [
 
 export default function App() {
   const [mounted, setMounted] = useState(false)
+  const [workspaceId, setWorkspaceId] = useState(null)
+  
   const [messages, setMessages] = useState([])
   const [tasks, setTasks] = useState([])
   const [activeTaskId, setActiveTaskId] = useState(null)
@@ -350,15 +328,38 @@ export default function App() {
   const [clients, setClients] = useState(1)
   const [allowedDomains, setAllowedDomains] = useState([])
 
+  const searchParams = useSearchParams()
+  const router = useRouter()
+  const pathname = usePathname()
+
   const roomRef = useRef(null)
   const threadRef = useRef(null)
   const pollRef = useRef(null)
   const seenMessageIdsRef = useRef(new Set())
 
-  // Do not render browser-only workspace identity during SSR. This keeps the
-  // server HTML identical to the first client render, then reads localStorage
-  // after hydration.
-  useEffect(() => setMounted(true), [])
+  // Initialize Workspace ID exactly once on mount, or whenever the URL param changes
+  useEffect(() => {
+    let id = searchParams.get('workspace')
+    if (!id) {
+      id = localStorage.getItem('recall_ws_id') ||
+        ('00000000-0000-0000-0000-' + Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12))
+      router.replace(`${pathname}?workspace=${id}`)
+    }
+    localStorage.setItem('recall_ws_id', id)
+    
+    // If the ID genuinely changed (e.g. via navigation or back button), fully reset the state
+    if (workspaceId && id !== workspaceId) {
+      setMessages([])
+      setTasks([])
+      setActiveTaskId(null)
+      seenMessageIdsRef.current.clear()
+      if (roomRef.current) {
+        roomRef.current.disconnect()
+      }
+    }
+    setWorkspaceId(id)
+    setMounted(true)
+  }, [searchParams, router, pathname, workspaceId])
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -375,9 +376,10 @@ export default function App() {
   }, [])
 
   const rehydrateActivity = useCallback(async () => {
+    if (!workspaceId) return
     const [tasksRes, auditRes] = await Promise.all([
-      fetch(`${API}/workspace/${WORKSPACE_ID}/tasks`),
-      fetch(`${API}/workspace/${WORKSPACE_ID}/audit`),
+      fetch(`${API}/workspace/${workspaceId}/tasks`),
+      fetch(`${API}/workspace/${workspaceId}/audit`),
     ])
     if (!tasksRes.ok) throw new Error(await tasksRes.text())
     if (!auditRes.ok) throw new Error(await auditRes.text())
@@ -386,7 +388,7 @@ export default function App() {
     const audit = await auditRes.json()
     const detailedTasks = await Promise.all(list.map(async task => {
       try {
-        const response = await fetch(`${API}/workspace/${WORKSPACE_ID}/task/${task.task_id}`)
+        const response = await fetch(`${API}/workspace/${workspaceId}/task/${task.task_id}`)
         if (!response.ok) return task
         return { ...task, ...await response.json() }
       } catch (_) {
@@ -406,11 +408,12 @@ export default function App() {
       ? audit.filter(event => event.event_type === 'domain_blocked').map(flaggedAuditMessage)
       : []
     appendActivity([...persisted, ...flagged])
-  }, [appendActivity])
+  }, [workspaceId, appendActivity])
 
-  // LiveKit is the only realtime transport. Its reliable data channel carries
-  // versioned activity envelopes; stable event IDs make rendering idempotent.
+  // LiveKit is the only realtime transport.
   useEffect(() => {
+    if (!workspaceId) return
+    
     let disposed = false
     const appendEvent = (data) => {
       if (!['flagged_event', 'agent_message', 'human_message'].includes(data.type)) return
@@ -423,7 +426,7 @@ export default function App() {
     const connect = async () => {
       try {
         const tokenResponse = await fetch(
-          `${API}/v1/workspace/${WORKSPACE_ID}/token?client_id=${CLIENT_ID}&display_name=${encodeURIComponent(DISPLAY_NAME)}`,
+          `${API}/v1/workspace/${workspaceId}/token?client_id=${CLIENT_ID}&display_name=${encodeURIComponent(DISPLAY_NAME)}`,
         )
         if (!tokenResponse.ok) throw new Error(await tokenResponse.text())
         const credentials = await tokenResponse.json()
@@ -460,12 +463,12 @@ export default function App() {
       disposed = true
       roomRef.current?.disconnect()
     }
-  }, [appendActivity, rehydrateActivity])
+  }, [workspaceId, appendActivity, rehydrateActivity])
 
-  // Poll active task for updates
   const pollTask = useCallback(async (taskId) => {
+    if (!workspaceId) return
     try {
-      const r = await fetch(`${API}/workspace/${WORKSPACE_ID}/task/${taskId}`)
+      const r = await fetch(`${API}/workspace/${workspaceId}/task/${taskId}`)
       const t = await r.json()
       setTasks(prev => prev.map(x => x.task_id === taskId ? { ...x, ...t } : x))
       appendActivity(t.messages || [])
@@ -473,25 +476,25 @@ export default function App() {
         clearInterval(pollRef.current)
       }
     } catch (_) {}
-  }, [appendActivity])
+  }, [workspaceId, appendActivity])
 
-  // Fetch workspace settings plus durable task/audit history on initial load.
   useEffect(() => {
+    if (!workspaceId) return
     rehydrateActivity().catch(error => console.error('Activity rehydration failed', error))
-    fetch(`${API}/workspace/${WORKSPACE_ID}`)
+    fetch(`${API}/workspace/${workspaceId}`)
       .then(response => response.json())
       .then(workspace => {
         if (workspace.allowed_domains) setAllowedDomains(workspace.allowed_domains)
       })
       .catch(() => {})
-  }, [rehydrateActivity])
+  }, [workspaceId, rehydrateActivity])
 
   const handleSend = async () => {
-    if (!goal.trim() || sending) return
+    if (!goal.trim() || sending || !workspaceId) return
     setSending(true)
 
     try {
-      const r = await fetch(`${API}/workspace/${WORKSPACE_ID}/task`, {
+      const r = await fetch(`${API}/workspace/${workspaceId}/task`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ goal, display_name: DISPLAY_NAME }),
@@ -509,7 +512,6 @@ export default function App() {
       setActiveTaskId(task.task_id)
       setGoal('')
 
-      // Poll every 3s until done
       clearInterval(pollRef.current)
       pollRef.current = setInterval(() => pollTask(task.task_id), 3000)
 
@@ -524,17 +526,24 @@ export default function App() {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleSend()
   }
 
+  const handleNewWorkspace = () => {
+    const newId = '00000000-0000-0000-0000-' + Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12)
+    localStorage.setItem('recall_ws_id', newId)
+    // Force a hard reload as requested to ensure a completely clean start
+    window.location.href = `${window.location.pathname}?workspace=${newId}`
+  }
+
   const participants = [
     { id: 'you', name: DISPLAY_NAME, role: 'Human', type: 'online' },
     ...AGENTS,
     ...(clients > 1 ? [{ id: 'other', name: `+${clients - 1} more`, role: '', type: 'online' }] : []),
   ]
 
-  if (!mounted) return <div className="app-shell" />
+  if (!mounted || !workspaceId) return <div className="app-shell" />
 
   return (
     <div className="app-shell">
-      <Sidebar participants={participants} wsId={WORKSPACE_ID} allowedDomains={allowedDomains} />
+      <Sidebar participants={participants} wsId={workspaceId} allowedDomains={allowedDomains} onNewWorkspace={handleNewWorkspace} />
 
       {/* ── Center Thread ── */}
       <div className="center-pane">
