@@ -78,7 +78,7 @@ export default function LandingPage() {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '24px', fontSize: '14px' }}>
             <a href="https://github.com/Atharva14518/semantic-moss" target="_blank" style={{ color: 'var(--text-secondary)', textDecoration: 'none' }}>GitHub</a>
-            <a href="https://github.com/Atharva14518/semantic-moss/blob/main/BUSINESS_MODEL.md" target="_blank" style={{ color: 'var(--text-secondary)', textDecoration: 'none' }}>Business Model</a>
+            <Link href="/business-model" style={{ color: 'var(--text-secondary)', textDecoration: 'none' }}>Business Model</Link>
             <Link href="/workspace" style={{
               background: 'var(--accent-primary)',
               color: '#fff',
@@ -187,7 +187,7 @@ export default function LandingPage() {
         <footer className="footer-container">
           <div style={{ display: 'flex', gap: '24px' }}>
             <a href="https://github.com/Atharva14518/semantic-moss" target="_blank" style={{ color: 'var(--text-secondary)', textDecoration: 'none' }}>GitHub</a>
-            <a href="https://github.com/Atharva14518/semantic-moss/blob/main/BUSINESS_MODEL.md" target="_blank" style={{ color: 'var(--text-secondary)', textDecoration: 'none' }}>Business Model</a>
+            <Link href="/business-model" style={{ color: 'var(--text-secondary)', textDecoration: 'none' }}>Business Model</Link>
           </div>
           <div>
             Built for the Multiplayer AI and Collaborative Agents hackathon track.
